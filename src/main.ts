@@ -118,6 +118,7 @@ import * as Scenes_PaperMarioTheOrigamiKing from './PaperMarioTheOrigamiKing/sce
 import * as Scenes_NarutoGNT4 from './NarutoGNT4/scenes.js'
 import * as Scenes_KingdomHeartsDDD from './KingdomHeartsDDD/scenes.js';
 import * as Scenes_KingdomHeartsBBS from './KingdomHeartsDDD/scenes_bbs.js';
+import * as Scenes_PS2OsdSys from './PS2OsdSys/Scenes.js';
 
 import { DroppedFileSceneDesc, traverseFileSystemDataTransfer } from './Scenes_FileDrops.js';
 
@@ -202,6 +203,7 @@ const sceneGroups: (string | SceneGroup)[] = [
     Scenes_KatamariDamacy.sceneGroup,
     Scenes_KingdomHearts.sceneGroup,
     Scenes_KingdomHeartsIIFinalMix.sceneGroup,
+    Scenes_PS2OsdSys.sceneGroup,
     "Xbox",
     Scenes_SpongeBobBFBB.sceneGroup,
     Scenes_SpongeBobTSSM.sceneGroup,
