@@ -17,6 +17,7 @@ export default abstract class BaseDSP {
     private timeoutId: number | null = null;
     private running: boolean = false;
 
+    // TODO: Make AudioContext externally provided and start()/stop() optional
     protected constructor(private readonly schedulingLatency = 0.1) {
     }
 

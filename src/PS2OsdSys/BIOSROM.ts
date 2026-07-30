@@ -1,6 +1,9 @@
 import ArrayBufferSlice from "../ArrayBufferSlice";
-import { assertExists } from "../util";
+import {assertExists} from "../util";
 import { HD, parseHD, SQ, parseSQ } from "./OsdSnd/OsdSnd";
+import {loadTexture, Texture} from "./Textures";
+import {GfxDevice} from "../gfx/platform/GfxPlatform";
+import {ResourceID} from "./ResourceIDs";
 
 const RESET = new Uint8Array([0x52, 0x45, 0x53, 0x45, 0x54, 0, 0, 0, 0, 0]);
 
@@ -123,39 +126,33 @@ export interface SequencePair {
 }
 
 export class BIOSROM {
-    public sequences: Map<string, SequencePair> = new Map<string, SequencePair>();
-    
-    static readonly SEQUENCES = [
-        "SNDBOOTS",
-        "SNDTNNLS",
-        "SNDCLOKS",
-        "SNDTM30S",
-        "SNDTM60S",
-        "SNDLOGOS",
-        "SNDWARNS",
-        "SNDRCLKS"
-    ];
+    public sequences: Map<ResourceID, SequencePair> = new Map<ResourceID, SequencePair>();
+    public textures: Map<ResourceID, Texture> = new Map<ResourceID, Texture>();
 
-    public TEXOPNGD: ArrayBufferSlice;
-
-    constructor(biosBuffer: ArrayBufferSlice) {
+    constructor(biosBuffer: ArrayBufferSlice, device: GfxDevice) {
         const mainImage = ROMImage.parse(biosBuffer);
 
-        const sndImage = ROMImage.parse(mainImage.get("SNDIMAGE"));
-        const sndBootB = decompress(sndImage.get("SNDBOOTB"));
-        const sndBootH = parseHD(decompress(sndImage.get("SNDBOOTH")), sndBootB.createTypedArray(Uint8Array));
-        for (let i = 0; i < BIOSROM.SEQUENCES.length; ++i) {
-            const name = BIOSROM.SEQUENCES[i];
-            const pair: SequencePair = {
-                hd: sndBootH,
-                sq: parseSQ(decompress(sndImage.get(name)))
-            };
-            this.sequences.set(name, pair);
+        // Load SNDIMAGE span of resources.
+        const sndImage = ROMImage.parse(mainImage.get(ResourceID[ResourceID.SNDIMAGE]));
+        // SNDOSDDH and SNDOSDDB appear to be unused, so just use SNDBOOTH and SNDBOOTB for everything.
+        const sndBootB = decompress(sndImage.get(ResourceID[ResourceID.SNDBOOTB]));
+        const sndBootH = parseHD(decompress(sndImage.get(ResourceID[ResourceID.SNDBOOTH])), sndBootB.createTypedArray(Uint8Array));
+        for (let i = ResourceID.SNDIMAGE + 1; i < ResourceID.TEXIMAGE; ++i) {
+            const id: ResourceID = i;
+            const name = ResourceID[id];
+            if (name.endsWith("S")) {
+                this.sequences.set(id, {
+                    hd: sndBootH,
+                    sq: parseSQ(decompress(sndImage.get(name)))
+                });
+            }
         }
 
-        const texImage = ROMImage.parse(mainImage.get("TEXIMAGE"));
-        const comp = texImage.get("TEXOPNGD");
-        const decomp = decompress(comp);
-        this.TEXOPNGD = decomp;
+        // Load TEXIMAGE span of resources.
+        const texImage = ROMImage.parse(mainImage.get(ResourceID[ResourceID.TEXIMAGE]));
+        for (let i = ResourceID.TEXIMAGE + 1; i < ResourceID.ICOIMAGE; ++i) {
+            const id: ResourceID = i;
+            this.textures.set(id, loadTexture(id, decompress(texImage.get(ResourceID[id])), device));
+        }
     }
 }

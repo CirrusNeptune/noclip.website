@@ -6,7 +6,7 @@
 //   * ... a basic post-processing effect (chromatic aberration) showing how to use the render graph.
 //   * ... and an example of some custom panel UI.
 
-import { mat4 } from "gl-matrix";
+import {mat4, vec3} from "gl-matrix";
 import { IS_DEVELOPMENT } from "../BuildVersion";
 import { createBufferFromData } from "../gfx/helpers/BufferHelpers";
 import { fullscreenMegaState } from "../gfx/helpers/GfxMegaStateDescriptorHelpers";
@@ -24,9 +24,11 @@ import { SceneGfx, ViewerRenderInput } from "../viewer";
 import * as UI from "../ui";
 import { makeImageBitmapTexture2D } from "../gfx/helpers/TextureHelpers";
 import { FakeTextureHolder } from "../TextureHolder";
-import { BIOSROM } from "./BIOSROM";
+import {BIOSROM} from "./BIOSROM";
 import OsdSnd, {HD, SequenceState} from "./OsdSnd/OsdSnd";
-import {assertExists} from "../util";
+import {assert, assertExists} from "../util";
+import {ResourceID} from "./ResourceIDs";
+import {clamp, lerp} from "../MathHelpers";
 
 // When we want to load files or assets at runtime, what directory are these assets in?
 // We're going to be loading data/Examples/mandrill.jpg from here later; pathBase is relative to the data/ directory.
@@ -299,6 +301,280 @@ class CubeGeometry {
     }
 }
 
+class OpeningFogProgram extends DeviceProgram {
+    // Define our vertex input data ("attributes"). By convention, we tend to use an "a_" prefix for
+    // vertex attributes.
+    public static a_Position = 0;
+    public static a_TexCoord = 1;
+    public static a_Color = 2;
+
+    // Define the slot index for our uniform parameters. noclip's framework just assigns sequential indices to
+    // uniform blocks seen in the shader, in-order, starting with 0.
+    public static ub_SceneParams = 0;
+    public static ub_OpeningFogParams = 1;
+
+    // The GLSL code for the vertex shader.
+    public override vert = `
+// Now we're writing a GLSL shader. The vertex shader will be run once for every vertex in a triangle.
+
+// Include our common declarations; this includes our uniform buffers and our textures.
+${OpeningFogProgram.Common}
+
+// Here are our input vertex attributes. I use an "a_" prefix for vertex attributes.
+layout(location = ${OpeningFogProgram.a_Position}) in vec3 a_Position;
+layout(location = ${OpeningFogProgram.a_TexCoord}) in vec2 a_TexCoord;
+layout(location = ${OpeningFogProgram.a_Color}) in vec4 a_Color;
+
+// Here are the outputs from our vertex shader; these will be interpolated across the triangle and passed into the fragment shader.
+// Position is a system output and doesn't require us to declare it.
+// I use a "v_" prefix for vertex shader outputs / pixel shader inputs (so-called "varying"s).
+out vec2 v_TexCoord;
+out vec4 v_Color;
+
+void main() {
+    // Compute our world-space position from the position vertex attribute, and our uniform data.
+    // I use a "t_" prefix to mean "temporary variable".
+    // The UnpackMatrix call here comes from the MatrixLibrary (see the Common declarations below).
+    vec3 t_PositionWorld = (UnpackMatrix(u_WorldFromLocal) * vec4(a_Position.xyz, 1.0f)).xyz;
+
+    // Compute our output clip-space position from the world-space position.
+    // I like to name matrices with the format "SpaceFromSpace". That way, you can snap them together like:
+    //   u_ClipFromWorld * u_WorldFromView * u_ViewFromLocal * t_PositionView.
+    gl_Position = UnpackMatrix(u_ClipFromWorld) * vec4(t_PositionWorld, 1.0f);
+
+    // Output our texture coordinates for sampling to the fragment shader below.
+    v_TexCoord = a_TexCoord.xy;
+
+    v_Color = a_Color;
+}
+`;
+
+    // The GLSL code for the fragment shader.
+    public override frag = `
+// Now we're in the fragment shader (also sometimes called a pixel shader). This shader runs once for each pixel.
+
+${OpeningFogProgram.Common}
+
+// This will be filled in by the output of our vertex shader.
+in vec2 v_TexCoord;
+in vec4 v_Color;
+
+void main() {
+    // Use the UV coordinates output by the vertex shader to sample our texture.
+    //gl_FragColor = texture(SAMPLER_2D(u_Texture), v_TexCoord.xy) * v_Color;
+    gl_FragColor = vec4(0,0,0,1);
+}
+`;
+
+    // Common declarations in both the vertex and fragment shader. This includes uniform data and textures.
+    public static Common = `
+// Import some helper code. In this case, we use a special matrix library as a workaround for some computers
+// with incomplete WebGL implementations.
+${GfxShaderLibrary.MatrixLibrary}
+
+// Declare our uniform data. These are parameters that are constant across the entire draw call,
+// and do not change per vertex or per pixel.
+layout(std140) uniform ub_SceneParams {
+    // Define our ViewProjection, or "ClipFromWorld" matrix, since it transforms us into clip space, from world space.
+    // I use a "u_" prefix for uniform parameters.
+    Mat4x4 u_ClipFromWorld;
+};
+
+// Define a second matrix for our cube's transform. This could be in the uniform buffer above, however
+// I'm declaring two of them just to show how that works.
+layout(std140) uniform ub_OpeningFogParams {
+    Mat3x4 u_WorldFromLocal;
+};
+
+// Declare our texture for the cube.
+layout(location = 0) uniform sampler2D u_Texture;
+`;
+
+}
+
+class OpeningFogGeometry {
+    public vertexBuffer: GfxBuffer;
+    public indexBuffer: GfxBuffer;
+    public indexCount: number;
+    public inputLayout: GfxInputLayout;
+
+    constructor(cache: GfxRenderCache) {
+        const device = cache.device;
+
+        // Vertex format [XYZ], [UV], [RGBA]
+        const vertexData = new Float32Array(17 * 17 * 9);
+
+        // X major in the original
+        for (let x = 0; x < 17; ++x) {
+            for (let y = 0; y < 17; ++y) {
+                const fVar10 = -5.0999994 - ((x * 2 - 16) * 6 * 0.5 + 3);
+                let fVar7 = -((y * 2 - 16) * 6 * 0.5 + 3);
+                fVar7 = ((72.12489 - Math.sqrt(fVar10 ** 2 + fVar7 ** 2) * 4) * 96) / 72.12489;
+                fVar7 = clamp(fVar7, 0, 127) >>> 0;
+
+                const vertOff = (x * 17 + y) * 9;
+                vertexData[vertOff] = x * 6 - 48;
+                vertexData[vertOff + 1] = x * 6 - 48;
+                vertexData[vertOff + 2] = 134;
+                vertexData[vertOff + 3] = x * 0.5;
+                vertexData[vertOff + 4] = y * 0.5; // Also a scroll for the shader
+                vertexData[vertOff + 5] = 0;
+                vertexData[vertOff + 6] = 0;
+                vertexData[vertOff + 7] = fVar7 / 255;
+                vertexData[vertOff + 8] = 128 / 255;
+            }
+        }
+
+        this.indexCount = 16 * 16 * 6;
+        const indexData = new Uint16Array(this.indexCount);
+
+        for (let x = 0; x < 16; ++x) {
+            for (let y = 0; y < 16; ++y) {
+                const indexOff = (x * 16 + y) * 6;
+                indexData[indexOff] = x * 17 + y;
+                indexData[indexOff + 1] = x * 17 + (y + 1);
+                indexData[indexOff + 2] = (x + 1) * 17 + y;
+                indexData[indexOff + 3] = (x + 1) * 17 + (y + 1);
+                indexData[indexOff + 4] = (x + 1) * 17 + y;
+                indexData[indexOff + 5] = x * 17 + (y + 1);
+            }
+        }
+
+        let temp = [
+            [0, 0],
+            [0, -1],
+            [1, 0]
+        ];
+        for (let i = 0; i < 3; ++i) {
+            const vertOff = i * 9;
+            vertexData[vertOff] = temp[i][0];
+            vertexData[vertOff + 1] = temp[i][1];
+            vertexData[vertOff + 2] = 0;
+            vertexData[vertOff + 3] = 0;
+            vertexData[vertOff + 4] = 0;
+            vertexData[vertOff + 5] = 0;
+            vertexData[vertOff + 6] = 0;
+            vertexData[vertOff + 7] = 0;
+            vertexData[vertOff + 8] = 0;
+        }
+
+        indexData[0] = 0;
+        indexData[1] = 1;
+        indexData[2] = 2;
+
+        this.indexCount = 3;
+
+        this.vertexBuffer = createBufferFromData(device, GfxBufferUsage.Vertex, GfxBufferFrequencyHint.Static, vertexData.buffer);
+        device.setResourceName(this.vertexBuffer, "OpeningFog (VB)");
+
+        this.indexBuffer = createBufferFromData(device, GfxBufferUsage.Index, GfxBufferFrequencyHint.Static, indexData.buffer);
+        device.setResourceName(this.indexBuffer, "OpeningFog (IB)");
+
+        this.inputLayout = cache.createInputLayout({
+            vertexAttributeDescriptors: [
+                {
+                    location: OpeningFogProgram.a_Position,
+                    format: GfxFormat.F32_RGB,
+                    bufferByteOffset: 0,
+                    bufferIndex: 0,
+                },
+                {
+                    location: OpeningFogProgram.a_TexCoord,
+                    format: GfxFormat.F32_RG,
+                    bufferByteOffset: 3 * 4,
+                    bufferIndex: 0,
+                },
+                {
+                    location: OpeningFogProgram.a_Color,
+                    format: GfxFormat.F32_RGBA,
+                    bufferByteOffset: 5 * 4,
+                    bufferIndex: 0,
+                },
+            ],
+
+            vertexBufferDescriptors: [
+                {
+                    byteStride: 9 * 4,
+                    frequency: GfxVertexBufferFrequency.PerVertex,
+                },
+            ],
+
+            indexBufferFormat: GfxFormat.U16_R,
+        });
+    }
+
+    public destroy(device: GfxDevice): void {
+        device.destroyBuffer(this.vertexBuffer);
+        device.destroyBuffer(this.indexBuffer);
+    }
+}
+
+enum OverallOpeningState {
+    // Added for noclip so stableTick() can return rather
+    // than being stuck in a modal loop like the original
+    InitForNoclip = -1,
+    OpeningScreen,
+    WarningScreen,
+    Done
+}
+
+enum ScreenProcessingState {
+    NeedsInit,
+    NeedsUpdate,
+    Done
+}
+
+enum AnimationProcessingState {
+    Zero,
+    One,
+    Two,
+    Three,
+    Four,
+    Five,
+    Six,
+    Seven,
+}
+
+enum TextFadingState {
+    DoneFading = -1,
+    NotYetFading,
+    Fading
+}
+
+/**
+ * Any animated variables directly used in drawing should be kept here
+ * and linear interpolated with the previous to resolve the stable tick results
+ */
+interface StableState {
+    cameraPosition: vec3,
+    cameraRoll: number,
+    sceTextAlpha: number,
+    warningTextAlpha: number,
+}
+
+function makeStableState(): StableState {
+    return {
+        cameraPosition: vec3.create(),
+        cameraRoll: 0,
+        sceTextAlpha: 0,
+        warningTextAlpha: 0,
+    }
+}
+
+function transferStableState(to: StableState, from: StableState) {
+    vec3.copy(to.cameraPosition, from.cameraPosition);
+    to.cameraRoll = from.cameraRoll;
+    to.sceTextAlpha = from.sceTextAlpha;
+    to.warningTextAlpha = from.warningTextAlpha;
+}
+
+function interpolateStableState(out: StableState, a: StableState, b: StableState, alpha: number) {
+    vec3.lerp(out.cameraPosition, a.cameraPosition, b.cameraPosition, alpha);
+    out.cameraRoll = lerp(a.cameraRoll, b.cameraRoll, alpha);
+    out.sceTextAlpha = lerp(a.sceTextAlpha, b.sceTextAlpha, alpha);
+    out.warningTextAlpha = lerp(a.warningTextAlpha, b.warningTextAlpha, alpha);
+}
+
 class BIOSScene implements SceneGfx {
     private renderHelper: GfxRenderHelper;
 
@@ -313,6 +589,9 @@ class BIOSScene implements SceneGfx {
     // The texture for our cube.
     private cubeTexture: GfxTexture | null = null;
 
+    private openingFogGeometry: OpeningFogGeometry;
+    private openingFogProgram: GfxProgram;
+
     // The sampler for our cube, and for post-processing.
     private linearSampler: GfxSampler;
 
@@ -320,23 +599,27 @@ class BIOSScene implements SceneGfx {
     private postprocessingProgram: GfxProgram;
 
     // Post-Processing Toggle (Render Setting)
-    public enablePostProcessing = true;
+    public enablePostProcessing = false;
     public aberrationStrength = 0.2;
 
     public textureHolder = new FakeTextureHolder([]);
 
     private osdSnd: OsdSnd;
-    private sequenceStates: Map<string, SequenceState> = new Map<string, SequenceState>();
+    private sequenceStates: Map<ResourceID, SequenceState> = new Map<ResourceID, SequenceState>();
 
     constructor(private sceneContext: SceneContext, private biosROM: BIOSROM) {
         this.osdSnd = new OsdSnd();
         const uniqueHDs = new Set<HD>();
-        this.biosROM.sequences.forEach((pair, name) => {
-            this.sequenceStates.set(name, this.osdSnd.addSQ(pair.hd, pair.sq));
+        this.biosROM.sequences.forEach((pair, id) => {
+            this.sequenceStates.set(id, this.osdSnd.addSQ(pair.hd, pair.sq));
             uniqueHDs.add(pair.hd);
         });
         this.osdSnd.start();
         uniqueHDs.forEach((hd) => this.osdSnd.precacheSamples(hd));
+
+        biosROM.textures.forEach((texture) => {
+            this.textureHolder.viewerTextures.push(texture);
+        });
 
         // The GfxRenderHelper is a helper class that contains several helpers.
         this.renderHelper = new GfxRenderHelper(sceneContext.device, sceneContext);
@@ -354,6 +637,9 @@ class BIOSScene implements SceneGfx {
         this.cubeProgram = cache.createProgram(new CubeProgram());
         this.postprocessingProgram = cache.createProgram(new PostProcessingProgram());
 
+        this.openingFogGeometry = new OpeningFogGeometry(cache);
+        this.openingFogProgram = cache.createProgram(new OpeningFogProgram());
+
         // Samplers define how exactly textures are sampled; in this case, we want linear filtering,
         // and we want UVs that are out of bounds to clamp rather than repeat.
         this.linearSampler = cache.createSampler({
@@ -368,7 +654,7 @@ class BIOSScene implements SceneGfx {
         this.fetchTexture();
 
         // Give audio context some time to start
-        setTimeout(() => this.osdSnd.startSeq(assertExists(this.sequenceStates.get("SNDCLOKS"))), 200);
+        setTimeout(() => this.osdSnd.startSeq(assertExists(this.sequenceStates.get(ResourceID.SNDCLOKS))), 200);
     }
 
     private async fetchTexture() {
@@ -454,6 +740,59 @@ class BIOSScene implements SceneGfx {
         this.renderInstList.submitRenderInst(renderInst);
     }
 
+    private renderOpeningFog(time: number): void {
+        const passTextureIDs = [
+            ResourceID.TEXOFOG4,
+            ResourceID.TEXOFOG2,
+            ResourceID.TEXOFOG1,
+            ResourceID.TEXOFOG4,
+            ResourceID.TEXOFOG2,
+            ResourceID.TEXOFOG1,
+        ];
+
+        for (let p = 0; p < 6; ++p) {
+            const renderInst = this.renderHelper.renderInstManager.newRenderInst();
+
+            const passTexture = assertExists(this.biosROM.textures.get(passTextureIDs[p]));
+
+            renderInst.setGfxProgram(this.openingFogProgram);
+
+            renderInst.setSamplerBindings(0, [
+                {gfxTexture: passTexture.gfxTexture, gfxSampler: this.linearSampler}
+            ]);
+
+            renderInst.setVertexInput(
+                this.openingFogGeometry.inputLayout,
+                [{buffer: this.openingFogGeometry.vertexBuffer, byteOffset: 0}],
+                {buffer: this.openingFogGeometry.indexBuffer, byteOffset: 0},
+            );
+
+            renderInst.setDrawCount(this.openingFogGeometry.indexCount);
+
+            // Create a transform for our cube.
+            const fogMatrix = mat4.create();
+            // Move it back a bit.
+            mat4.translate(fogMatrix, fogMatrix, [0, 0, 0 - p * 5]);
+            // Rotate it over time.
+            //mat4.rotateX(fogMatrix, fogMatrix, time * 0.0007);
+            //mat4.rotateY(fogMatrix, fogMatrix, time * 0.0003);
+            // Scale up our cube by 50 to make it larger on the screen.
+            mat4.scale(fogMatrix, fogMatrix, [50, 50, 50]);
+
+            // Now upload our cube's parameter data to the GPU, which is our matrix.
+            // This is a Mat3x4, which is 3 groups of 4 floats.
+            const openingFogParams = renderInst.allocateUniformBufferF32(OpeningFogProgram.ub_OpeningFogParams, 12);
+            let offs = 0;
+            offs += fillMatrix4x3(openingFogParams, offs, fogMatrix);
+
+            // Turn on backface culling. This is one of the fixed-function settings available through the MegaStateFlags.
+            renderInst.setMegaStateFlags({cullMode: GfxCullMode.None});
+
+            // Now that we're done setting up our render object, we can add it to our list of objects...
+            this.renderInstList.submitRenderInst(renderInst);
+        }
+    }
+
     private pushPostProcessingPass(builder: GfxrGraphBuilder, mainColorTargetID: GfxrRenderTargetID): void {
         // In order to use post-processing, we need to copy the texture we just rendered to so we can sample
         // it in our post-processing shader. We do this with "resolve textures"; this ID is a handle we can later
@@ -513,6 +852,220 @@ class BIOSScene implements SceneGfx {
         });
     }
 
+    static readonly STABLE_TICK_RATE = 1.0 / 60.0;
+    private lastStableTickTime: number | null = null;
+    private tickStableState: StableState = makeStableState();
+    private prevStableState: StableState = makeStableState();
+    private drawStableState: StableState = makeStableState();
+
+    private frameCounter: number = 0;
+    private entryOverallOpeningState = OverallOpeningState.OpeningScreen;
+    private overallOpeningState: OverallOpeningState = OverallOpeningState.InitForNoclip;
+    private requestedOverallOpeningState: OverallOpeningState = OverallOpeningState.InitForNoclip;
+    private screenProcessingState: ScreenProcessingState = ScreenProcessingState.NeedsInit;
+    private animationProcessingState: AnimationProcessingState = AnimationProcessingState.Zero;
+    private sceTextState: TextFadingState = TextFadingState.DoneFading;
+    private warningTextState: TextFadingState = TextFadingState.DoneFading;
+
+    private cameraPosition_dx_dt: vec3 = vec3.create();
+    private cameraPosition_ddx_dt: vec3 = vec3.create();
+    private cameraPosition_dddx_dt: vec3 = vec3.create();
+
+    private cameraRoll_dx_dt: number = 0;
+    private cameraRoll_ddx_dt: number = 0;
+
+    private animationReadyForTransitionToNextScreen: boolean = false;
+    private fadeWarningTextOut: boolean = false;
+
+    private sceTextAlpha_dx_dt: number = 0;
+
+    private openingInitAnimation() {
+        this.animationProcessingState = AnimationProcessingState.Zero;
+        vec3.set(this.cameraPosition_dx_dt, 0, 0, 0.004);
+        vec3.set(this.cameraPosition_ddx_dt, 0, 0, 0);
+        this.cameraPosition_dddx_dt[2] = 0.0;
+        this.cameraRoll_dx_dt = 0.001;
+        this.cameraRoll_ddx_dt = 0.0;
+        this.animationReadyForTransitionToNextScreen = false;
+    }
+
+    private openingInitTowersFog() {
+
+    }
+
+    private openingInit_0021e578() {
+        this.fadeWarningTextOut = false;
+    }
+
+    private openingInitTextFade() {
+        if (this.entryOverallOpeningState === OverallOpeningState.OpeningScreen) {
+            this.sceTextState = TextFadingState.NotYetFading;
+            this.warningTextState = TextFadingState.DoneFading;
+        } else {
+            this.sceTextState = TextFadingState.DoneFading;
+            this.warningTextState = TextFadingState.NotYetFading;
+        }
+        this.tickStableState.sceTextAlpha = 0.0;
+        this.sceTextAlpha_dx_dt = 4.0;
+        this.tickStableState.warningTextAlpha = 0.0;
+    }
+
+    private openingInit() {
+        this.overallOpeningState = this.entryOverallOpeningState;
+        this.requestedOverallOpeningState = this.entryOverallOpeningState;
+        this.openingInitAnimation();
+        this.openingInitTowersFog();
+        this.openingInit_0021e578();
+        this.openingInitTextFade();
+        this.frameCounter = 0;
+    }
+
+    private tickAnimation() {
+
+    }
+
+    private tickOpeningScreen() {
+
+    }
+
+    private tickWarningScreen() {
+
+    }
+
+    private tickSCEText() {
+        if (this.tickStableState.cameraPosition[2] > 18.0 && this.sceTextState === TextFadingState.NotYetFading) {
+            this.sceTextState = TextFadingState.Fading;
+        } else if (this.sceTextState !== TextFadingState.Fading) {
+            return;
+        }
+
+        this.tickStableState.sceTextAlpha += this.sceTextAlpha_dx_dt;
+        if (this.tickStableState.sceTextAlpha === 0xf0) {
+            this.sceTextAlpha_dx_dt = -4;
+        }
+        if (this.tickStableState.sceTextAlpha === 0) {
+            this.sceTextAlpha_dx_dt = 4;
+            this.sceTextState = TextFadingState.DoneFading;
+        }
+    }
+
+    private drawSCEText() {
+        if (this.sceTextState !== TextFadingState.Fading) {
+            return;
+        }
+
+        const alpha = Math.min(0x70, this.drawStableState.sceTextAlpha);
+        console.log(`Drawing SCE at ${alpha} alpha`);
+    }
+
+    private tickWarningText() {
+        if (this.tickStableState.cameraPosition[2] > 800.0 && this.warningTextState === TextFadingState.NotYetFading) {
+            this.warningTextState = TextFadingState.Fading;
+        } else if (this.warningTextState !== TextFadingState.Fading) {
+            return;
+        }
+
+        if (!this.fadeWarningTextOut) {
+            this.tickStableState.warningTextAlpha += 1;
+        } else if (this.tickStableState.warningTextAlpha > 0) {
+            this.tickStableState.warningTextAlpha -= 1;
+        }
+    }
+
+    private drawWarningText() {
+        if (this.warningTextState !== TextFadingState.Fading) {
+            return;
+        }
+
+        const alpha = Math.min(0x70, this.drawStableState.warningTextAlpha);
+        console.log(`Drawing warning at ${alpha} alpha`);
+    }
+
+    private tickTextFade() {
+        this.tickSCEText();
+        this.tickWarningText();
+    }
+
+    private drawTextFade() {
+        this.drawSCEText();
+        this.drawWarningText();
+    }
+
+    /**
+     * The BIOS opening animation makes heavy use of third-order differentials
+     * and state transitions which assume a fixed update cadence. Since noclip
+     * cannot guarantee this, stableTick is called in a sub-ticking loop which
+     * simulates a stable ticking at 60Hz.
+     *
+     * Make all stable state accesses through this.tickStableState.
+     */
+    private stableTick() {
+        if (this.overallOpeningState === OverallOpeningState.InitForNoclip) {
+            this.openingInit();
+        }
+        if (this.overallOpeningState === OverallOpeningState.Done) {
+            return;
+        }
+
+        this.tickAnimation();
+
+        if (this.overallOpeningState === OverallOpeningState.OpeningScreen) {
+            this.tickOpeningScreen();
+        } else if (this.overallOpeningState === OverallOpeningState.WarningScreen) {
+            this.tickWarningScreen();
+        }
+
+        this.tickTextFade();
+
+        this.frameCounter += 1;
+    }
+
+    /**
+     * In the original, tick and draw were performed in the same call flow.
+     * In noclip it's split into paired tick/draw functions. The previous
+     * stable state is kept so the actual draw can present a linear
+     * interpolation between two states and unlock the overall presentation
+     * from 60Hz without disrupting the original behavior.
+     *
+     * Make all stable state accesses through this.drawStableState.
+     */
+    private stableDraw() {
+        if (this.overallOpeningState === OverallOpeningState.Done) {
+            return;
+        }
+
+        // TODO: Screens
+
+        this.drawTextFade();
+
+        // TODO: Letterbox
+    }
+
+    private tick(time: number) {
+        if (this.lastStableTickTime === null) {
+            this.stableTick();
+            transferStableState(this.prevStableState, this.tickStableState);
+            this.lastStableTickTime = time;
+            return;
+        }
+        while (this.lastStableTickTime < time) {
+            transferStableState(this.prevStableState, this.tickStableState);
+            this.stableTick();
+            this.lastStableTickTime += BIOSScene.STABLE_TICK_RATE;
+        }
+    }
+
+    private draw(time: number) {
+        const lastStableTickTime = assertExists(this.lastStableTickTime);
+        assert(time <= lastStableTickTime);
+
+        const prevStableTickTime = lastStableTickTime - BIOSScene.STABLE_TICK_RATE;
+        const alpha = clamp((time - prevStableTickTime) / BIOSScene.STABLE_TICK_RATE, 0.0, 1.0);
+
+        interpolateStableState(this.drawStableState, this.prevStableState, this.tickStableState, alpha);
+        this.stableDraw();
+    }
+
     public render(device: GfxDevice, viewerInput: ViewerRenderInput): void {
         // noclip's framework will call your render function once per frame. The device will always be the same
         // as the device passed in through the sceneContext in the constructor. The renderInput provided contains
@@ -553,7 +1106,12 @@ class BIOSScene implements SceneGfx {
         this.fillSceneParams(template, viewerInput);
 
         // Render our cube.
-        this.renderCube(viewerInput.time);
+        //this.renderCube(viewerInput.time);
+
+        this.renderOpeningFog(viewerInput.time);
+
+        this.tick(viewerInput.time);
+        this.draw(viewerInput.time);
 
         // We could manually configure render passes using device.createRenderPass(), but we have a helper to
         // make writing render pass logic easier called the render graph; our render helper has one of them.
@@ -658,7 +1216,7 @@ class OsdSysSceneDesc implements SceneDesc {
     public async createScene(device: GfxDevice, sceneContext: SceneContext): Promise<SceneGfx> {
         // Start the BIOS loading (async)
         const biosBuffer = await sceneContext.dataFetcher.fetchData(`${pathBase}/SCPH-70004_BIOS_V12_PAL_200.BIN`);
-        return new BIOSScene(sceneContext, new BIOSROM(biosBuffer));
+        return new BIOSScene(sceneContext, new BIOSROM(biosBuffer, sceneContext.device));
     }
 }
 

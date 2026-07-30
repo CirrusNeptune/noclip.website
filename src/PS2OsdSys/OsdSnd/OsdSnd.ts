@@ -351,9 +351,10 @@ function makeVoiceState(): VoiceState {
  * This reimplements "Component Sound Library" -- an SPU driver found in later
  * PS1 games (circa 1999). It was ported to the "tentative" libspu2 library to
  * run on PS2 as an IOP module. It provides a lightweight MIDI sequencer ticked
- * on every 256th line of H-SYNC (a tad faster than 60Hz). This implementation
- * uses predictive Web Audio scheduling rather than a strictly timer-based
- * approach.
+ * every frame, so events become temporally aliased in the original
+ * implementation. This implementation uses predictive Web Audio scheduling
+ * rather than a strictly timer-based approach, so it's more faithful to the
+ * MIDI data rather than the original sequencer.
  *
  * Component Sound Library discussion:
  * https://hcs64.com/mboard/forum.php?showthread=63999
