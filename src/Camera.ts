@@ -268,7 +268,7 @@ export class FPSCameraController implements CameraController {
         return this.keyMoveSpeed;
     }
 
-    public update(inputManager: InputManager, dt: number): CameraUpdateResult {
+    public update(inputManager: InputManager, dt: number, sceneTimeScale: number): CameraUpdateResult {
         const camera = this.camera;
         let updated = false;
 
@@ -440,7 +440,7 @@ export class StudioCameraController extends FPSCameraController {
         super();
     }
 
-    public override update(inputManager: InputManager, dt: number): CameraUpdateResult {
+    public override update(inputManager: InputManager, dt: number, sceneTimeScale: number): CameraUpdateResult {
         let result;
 
         if (this.isAnimationPlaying) {
@@ -450,7 +450,7 @@ export class StudioCameraController extends FPSCameraController {
             // Set result to unchanged to prevent needless savestate creation during playback.
             result = CameraUpdateResult.Unchanged;
         } else {
-            result = super.update(inputManager, dt);
+            result = super.update(inputManager, dt, sceneTimeScale);
 
             this.studioPanel.drawWorldHelpers(this.camera.clipFromWorldMatrix);
         }

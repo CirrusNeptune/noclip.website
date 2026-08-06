@@ -1,511 +1,40 @@
-
-// Example of a noclip scene.
-// This renders a cube with a texture:
-//   * ... the cube model is created through code.
-//   * ... the texture is loaded from a JPEG file loaded over the network.
-//   * ... a basic post-processing effect (chromatic aberration) showing how to use the render graph.
-//   * ... and an example of some custom panel UI.
-
 import {mat4, vec3} from "gl-matrix";
-import { IS_DEVELOPMENT } from "../BuildVersion";
-import { createBufferFromData } from "../gfx/helpers/BufferHelpers";
-import { fullscreenMegaState } from "../gfx/helpers/GfxMegaStateDescriptorHelpers";
-import { GfxShaderLibrary } from "../gfx/helpers/GfxShaderLibrary";
 import { makeBackbufferDescSimple, standardFullClearRenderPassDescriptor } from "../gfx/helpers/RenderGraphHelpers";
-import { fillMatrix4x3, fillMatrix4x4, fillVec4 } from "../gfx/helpers/UniformBufferHelpers";
-import { GfxBuffer, GfxBufferFrequencyHint, GfxBufferUsage, GfxCullMode, GfxDevice, GfxFormat, GfxInputLayout, GfxMipFilterMode, GfxProgram, GfxSampler, GfxTexFilterMode, GfxTexture, GfxVertexBufferFrequency, GfxWrapMode, makeTextureDescriptor2D } from "../gfx/platform/GfxPlatform";
-import { GfxRenderCache } from "../gfx/render/GfxRenderCache";
-import { GfxrAttachmentSlot, GfxrGraphBuilder, GfxrRenderTargetID } from "../gfx/render/GfxRenderGraph";
+import { fillMatrix4x4 } from "../gfx/helpers/UniformBufferHelpers";
+import { GfxDevice, GfxMipFilterMode, GfxSampler, GfxTexFilterMode, GfxWrapMode } from "../gfx/platform/GfxPlatform";
+import { GfxrAttachmentSlot } from "../gfx/render/GfxRenderGraph";
 import { GfxRenderHelper } from "../gfx/render/GfxRenderHelper";
 import { GfxRenderInst, GfxRenderInstList } from "../gfx/render/GfxRenderInstManager";
-import { DeviceProgram } from "../Program";
 import { SceneContext, SceneDesc, SceneGroup } from "../SceneBase";
 import { SceneGfx, ViewerRenderInput } from "../viewer";
 import * as UI from "../ui";
-import { makeImageBitmapTexture2D } from "../gfx/helpers/TextureHelpers";
 import { FakeTextureHolder } from "../TextureHolder";
 import {BIOSROM} from "./BIOSROM";
 import OsdSnd, {HD, SequenceState} from "./OsdSnd/OsdSnd";
-import {assert, assertExists} from "../util";
+import {assert, assertExists, nArray} from "../util";
 import {ResourceID} from "./ResourceIDs";
-import {clamp, lerp} from "../MathHelpers";
+import {clamp, lerp, MathConstants, setMatrixTranslation} from "../MathHelpers";
+import RenderInterface from "./Render/RenderInterface";
+import OpeningFogGeometry from "./Render/OpeningFog";
+import {BaseProgram} from "./Render/Base";
+import TowersGeometry, {NUM_TOWERS, TOWER_GRID_HEIGHT, TOWER_GRID_WIDTH} from "./Render/Towers";
+import InputManager from "../InputManager";
+import {CameraController, CameraUpdateResult, FPSCameraController} from "../Camera";
+import {MCHistoryEntry, NUM_HISTORY_SLOTS, PlayerSimulationParams, simulatePlayer} from "./MCHistory";
+import {Green} from "../Color";
 
 // When we want to load files or assets at runtime, what directory are these assets in?
 // We're going to be loading data/Examples/mandrill.jpg from here later; pathBase is relative to the data/ directory.
 const pathBase = `PS2OsdSys`;
 
-// Our first shader program! This is GLSL code that we eventually give to the GPU to run.
-// It consists of two parts, a vertex shader, and a fragment shader.
-class CubeProgram extends DeviceProgram {
-    // Define our vertex input data ("attributes"). By convention, we tend to use an "a_" prefix for
-    // vertex attributes.
-    public static a_Position = 0;
-    public static a_TexCoord = 1;
-
-    // Define the slot index for our uniform parameters. noclip's framework just assigns sequential indices to
-    // uniform blocks seen in the shader, in-order, starting with 0.
-    public static ub_SceneParams = 0;
-    public static ub_CubeParams = 1;
-
-    // The GLSL code for the vertex shader.
-    public override vert = `
-// Now we're writing a GLSL shader. The vertex shader will be run once for every vertex in a triangle.
-
-// Include our common declarations; this includes our uniform buffers and our textures.
-${CubeProgram.Common}
-
-// Here are our input vertex attributes. I use an "a_" prefix for vertex attributes.
-layout(location = ${CubeProgram.a_Position}) in vec3 a_Position;
-layout(location = ${CubeProgram.a_TexCoord}) in vec2 a_TexCoord;
-
-// Here are the outputs from our vertex shader; these will be interpolated across the triangle and passed into the fragment shader.
-// Position is a system output and doesn't require us to declare it.
-// I use a "v_" prefix for vertex shader outputs / pixel shader inputs (so-called "varying"s).
-out vec2 v_TexCoord;
-
-void main() {
-    // Compute our world-space position from the position vertex attribute, and our uniform data.
-    // I use a "t_" prefix to mean "temporary variable".
-    // The UnpackMatrix call here comes from the MatrixLibrary (see the Common declarations below).
-    vec3 t_PositionWorld = (UnpackMatrix(u_WorldFromLocal) * vec4(a_Position.xyz, 1.0f)).xyz;
-
-    // Compute our output clip-space position from the world-space position.
-    // I like to name matrices with the format "SpaceFromSpace". That way, you can snap them together like:
-    //   u_ClipFromWorld * u_WorldFromView * u_ViewFromLocal * t_PositionView.
-    gl_Position = UnpackMatrix(u_ClipFromWorld) * vec4(t_PositionWorld, 1.0f);
-
-    // Output our texture coordinates for sampling to the fragment shader below.
-    v_TexCoord = a_TexCoord.xy;
-}
-`;
-
-    // The GLSL code for the fragment shader.
-    public override frag = `
-// Now we're in the fragment shader (also sometimes called a pixel shader). This shader runs once for each pixel.
-
-${CubeProgram.Common}
-
-// This will be filled in by the output of our vertex shader.
-in vec2 v_TexCoord;
-
-void main() {
-    // Use the UV coordinates output by the vertex shader to sample our texture.
-    gl_FragColor = texture(SAMPLER_2D(u_Texture), v_TexCoord.xy);
-}
-`;
-
-    // Common declarations in both the vertex and fragment shader. This includes uniform data and textures.
-    public static Common = `
-// Import some helper code. In this case, we use a special matrix library as a workaround for some computers
-// with incomplete WebGL implementations.
-${GfxShaderLibrary.MatrixLibrary}
-
-// Declare our uniform data. These are parameters that are constant across the entire draw call,
-// and do not change per vertex or per pixel.
-layout(std140) uniform ub_SceneParams {
-    // Define our ViewProjection, or "ClipFromWorld" matrix, since it transforms us into clip space, from world space.
-    // I use a "u_" prefix for uniform parameters.
-    Mat4x4 u_ClipFromWorld;
-};
-
-// Define a second matrix for our cube's transform. This could be in the uniform buffer above, however
-// I'm declaring two of them just to show how that works.
-layout(std140) uniform ub_CubeParams {
-    Mat3x4 u_WorldFromLocal;
-};
-
-// Declare our texture for the cube.
-layout(location = 0) uniform sampler2D u_Texture;
-`;
-
-}
-
-// Our second shader program. This one is for the post-processing "chromatic aberration" effect.
-class PostProcessingProgram extends DeviceProgram {
-    // Define our single uniform block.
-    public static ub_PostProcessingParams = 0;
-
-    // Definitions and code that will be in both the vertex and fragment shader.
-    public static Common = `
-layout(std140) uniform ub_PostProcessingParams {
-    // For complex GPU reasons, it's best to keep parameters in vec4's or other groups of 4. Look up
-    // the rules around std140 packing if you want more information about why. The convention I use
-    // is to have a field called "u_Misc" and then use #define's to give more names to individual members.
-    vec4 u_Misc[1];
-};
-
-layout(location = 0) uniform sampler2D u_TextureColor;
-
-#define u_AberrationStrength (u_Misc[0].x)
-`;
-
-    public override vert = `
-${PostProcessingProgram.Common}
-
-// Use a standard "fullscreenVS" shader which outputs a full-screen triangle,
-// and gives us some texture coordinates to work with in "vec2 v_TexCoord".
-// This automatically puts a main() for us.
-${GfxShaderLibrary.fullscreenVS}
-`;
-
-    public override frag = `
-${PostProcessingProgram.Common}
-
-in vec2 v_TexCoord;
-
-void main() {
-    // A simple Chromatic abberation effect.
-    gl_FragColor = texture(SAMPLER_2D(u_TextureColor), v_TexCoord.xy);
-
-    // Shift the red and blue texture coordinates by different amounts depending on the strength.
-    // mix() is a lerp function; when u_AberrationStrength is 0, the mix() function will return 1.0f,
-    // aka no shifting. When it's 1, it will shift by the full 1.1f or 0.9f.
-    gl_FragColor.r = texture(SAMPLER_2D(u_TextureColor), v_TexCoord.xy * mix(1.0f, 1.1f, u_AberrationStrength)).r;
-    gl_FragColor.b = texture(SAMPLER_2D(u_TextureColor), v_TexCoord.xy * mix(1.0f, 0.9f, u_AberrationStrength)).b;
-}
-`;
-}
-
-// Our example will consist of a cube with a texture on it.
-class CubeGeometry {
-    public vertexBuffer: GfxBuffer;
-    public indexBuffer: GfxBuffer;
-    public indexCount: number;
-    public inputLayout: GfxInputLayout;
-    public gfxProgram: GfxProgram;
-
-    constructor(cache: GfxRenderCache) {
-        const device = cache.device;
-
-        // Our cube consists of 6 faces, each one containing four vertices.
-
-        // Each vertex contains three positions (X, Y, Z), and two UV coordinates (U, V).
-        // That means that we have 5 floats per vertex, 5*4 = 20 floats per face, and 5*4*6 = 120 floats in the whole cube.
-        const vertexData = new Float32Array(120);
-        vertexData.set([
-            //   Face 0 - Left
-            //   X   Y   Z     U  V
-            -1, -1, -1,    0, 1,
-            -1, -1,  1,    1, 1,
-            -1,  1,  1,    1, 0,
-            -1,  1, -1,    0, 0,
-
-            //   Face 1 - Right
-            //   X   Y   Z     U  V
-            1, -1,  1,    0, 1,
-            1, -1, -1,    1, 1,
-            1,  1, -1,    1, 0,
-            1,  1,  1,    0, 0,
-
-            //   Face 2 - Top
-            //   X   Y   Z     U  V
-            -1,  1, -1,    0, 0,
-            -1,  1,  1,    0, 1,
-            1,  1,  1,    1, 1,
-            1,  1, -1,    1, 0,
-
-            //   Face 3 - Bottom
-            //   X   Y   Z     U  V
-            1, -1, -1,    0, 0,
-            1, -1,  1,    0, 1,
-            -1, -1,  1,    1, 1,
-            -1, -1, -1,    1, 0,
-
-            //   Face 4 - Front
-            //   X   Y   Z     U  V
-            -1,  1,  1,    0, 0,
-            -1, -1,  1,    0, 1,
-            1, -1,  1,    1, 1,
-            1,  1,  1,    1, 0,
-
-            //   Face 5 - Back
-            //   X   Y   Z     U  V
-            1,  1, -1,    0, 0,
-            1, -1, -1,    0, 1,
-            -1, -1, -1,    1, 1,
-            -1,  1, -1,    1, 0,
-        ]);
-
-        // Now create the index buffer. Each face contains 2 triangles, each triangle contains 3 vertices,
-        // so in total we have 2*3*6 = 36 total indices.
-        this.indexCount = 36;
-        const indexData = new Uint16Array(this.indexCount);
-
-        // The indices in this index buffer are indices into the vertex buffer. Specifically, each index
-        // in this buffer corresponds to a single line in the above vertexData array.
-        indexData.set([
-            0, 1, 2,     0, 2, 3,    // Face 0
-            4, 5, 6,     4, 6, 7,    // Face 1
-            8, 9, 10,    8, 10, 11,  // Face 2
-            12, 13, 14,  12, 14, 15, // Face 3
-            16, 17, 18,  16, 18, 19, // Face 4
-            20, 21, 22,  20, 22, 23, // Face 5
-        ]);
-
-        // createBufferFromData will upload the given data to the GPU, creating a GfxBuffer.
-        // GfxBufferUsage.Vertex means that it's a vertex buffer, and GfxBufferFrequencyHint.Static means that we only
-        // upload data to this buffer once, when creating it, and won't upload new data to this buffer at runtime.
-        this.vertexBuffer = createBufferFromData(device, GfxBufferUsage.Vertex, GfxBufferFrequencyHint.Static, vertexData.buffer);
-        device.setResourceName(this.vertexBuffer, "Cube (VB)");
-
-        this.indexBuffer = createBufferFromData(device, GfxBufferUsage.Index, GfxBufferFrequencyHint.Static, indexData.buffer);
-        device.setResourceName(this.indexBuffer, "Cube (IB)");
-
-        // The input layout describes how we map our vertex data into the shader.
-        this.inputLayout = cache.createInputLayout({
-            // We have two vertex attributes in our cube: the position and the UV coordinate.
-            vertexAttributeDescriptors: [
-                {
-                    // This attribute will be "hooked up" to the Position attribute in our shader.
-                    location: CubeProgram.a_Position,
-                    // The data here is 32-bit floats (F32), and there are three of them (RGB).
-                    // noclip uses R, RG, RGB, and RGBA to describe whether the format has 1, 2, 3, or 4 components,
-                    // to prevent there being a confusing mix of numbers like "F32_2", but this data does not have to
-                    // literally be color data.
-                    format: GfxFormat.F32_RGB,
-                    // The position data starts at the first byte of the provided data.
-                    bufferByteOffset: 0,
-                    // The position data is in the 0th buffer (we only have one!)
-                    bufferIndex: 0,
-                },
-                {
-                    // Now declare our UV attribute.
-                    location: CubeProgram.a_TexCoord,
-                    format: GfxFormat.F32_RG,
-                    bufferByteOffset: 3 * 4,
-                    bufferIndex: 0,
-                },
-            ],
-
-            vertexBufferDescriptors: [
-                // Declare the details of our vertex buffer.
-                {
-                    // Each vertex in this buffer is 5 floats long, and each float is 4 bytes long.
-                    byteStride: 5 * 4,
-                    // The data in this buffer advances per-vertex. Other options are constant, and per-instance data.
-                    frequency: GfxVertexBufferFrequency.PerVertex,
-                },
-            ],
-
-            // Our index buffer is a Uint16Array. That is a single Uint16, which we describe with the U16_R format.
-            indexBufferFormat: GfxFormat.U16_R,
-        });
-    }
-
-    public destroy(device: GfxDevice): void {
-        device.destroyBuffer(this.vertexBuffer);
-        device.destroyBuffer(this.indexBuffer);
-
-        // Don't destroy the GfxInputLayout or the GfxProgram;
-        // these were created with the GfxRenderCache, which does its own cleanup.
-    }
-}
-
-class OpeningFogProgram extends DeviceProgram {
-    // Define our vertex input data ("attributes"). By convention, we tend to use an "a_" prefix for
-    // vertex attributes.
-    public static a_Position = 0;
-    public static a_TexCoord = 1;
-    public static a_Color = 2;
-
-    // Define the slot index for our uniform parameters. noclip's framework just assigns sequential indices to
-    // uniform blocks seen in the shader, in-order, starting with 0.
-    public static ub_SceneParams = 0;
-    public static ub_OpeningFogParams = 1;
-
-    // The GLSL code for the vertex shader.
-    public override vert = `
-// Now we're writing a GLSL shader. The vertex shader will be run once for every vertex in a triangle.
-
-// Include our common declarations; this includes our uniform buffers and our textures.
-${OpeningFogProgram.Common}
-
-// Here are our input vertex attributes. I use an "a_" prefix for vertex attributes.
-layout(location = ${OpeningFogProgram.a_Position}) in vec3 a_Position;
-layout(location = ${OpeningFogProgram.a_TexCoord}) in vec2 a_TexCoord;
-layout(location = ${OpeningFogProgram.a_Color}) in vec4 a_Color;
-
-// Here are the outputs from our vertex shader; these will be interpolated across the triangle and passed into the fragment shader.
-// Position is a system output and doesn't require us to declare it.
-// I use a "v_" prefix for vertex shader outputs / pixel shader inputs (so-called "varying"s).
-out vec2 v_TexCoord;
-out vec4 v_Color;
-
-void main() {
-    // Compute our world-space position from the position vertex attribute, and our uniform data.
-    // I use a "t_" prefix to mean "temporary variable".
-    // The UnpackMatrix call here comes from the MatrixLibrary (see the Common declarations below).
-    vec3 t_PositionWorld = (UnpackMatrix(u_WorldFromLocal) * vec4(a_Position.xyz, 1.0f)).xyz;
-
-    // Compute our output clip-space position from the world-space position.
-    // I like to name matrices with the format "SpaceFromSpace". That way, you can snap them together like:
-    //   u_ClipFromWorld * u_WorldFromView * u_ViewFromLocal * t_PositionView.
-    gl_Position = UnpackMatrix(u_ClipFromWorld) * vec4(t_PositionWorld, 1.0f);
-
-    // Output our texture coordinates for sampling to the fragment shader below.
-    v_TexCoord = a_TexCoord.xy;
-
-    v_Color = a_Color;
-}
-`;
-
-    // The GLSL code for the fragment shader.
-    public override frag = `
-// Now we're in the fragment shader (also sometimes called a pixel shader). This shader runs once for each pixel.
-
-${OpeningFogProgram.Common}
-
-// This will be filled in by the output of our vertex shader.
-in vec2 v_TexCoord;
-in vec4 v_Color;
-
-void main() {
-    // Use the UV coordinates output by the vertex shader to sample our texture.
-    //gl_FragColor = texture(SAMPLER_2D(u_Texture), v_TexCoord.xy) * v_Color;
-    gl_FragColor = vec4(0,0,0,1);
-}
-`;
-
-    // Common declarations in both the vertex and fragment shader. This includes uniform data and textures.
-    public static Common = `
-// Import some helper code. In this case, we use a special matrix library as a workaround for some computers
-// with incomplete WebGL implementations.
-${GfxShaderLibrary.MatrixLibrary}
-
-// Declare our uniform data. These are parameters that are constant across the entire draw call,
-// and do not change per vertex or per pixel.
-layout(std140) uniform ub_SceneParams {
-    // Define our ViewProjection, or "ClipFromWorld" matrix, since it transforms us into clip space, from world space.
-    // I use a "u_" prefix for uniform parameters.
-    Mat4x4 u_ClipFromWorld;
-};
-
-// Define a second matrix for our cube's transform. This could be in the uniform buffer above, however
-// I'm declaring two of them just to show how that works.
-layout(std140) uniform ub_OpeningFogParams {
-    Mat3x4 u_WorldFromLocal;
-};
-
-// Declare our texture for the cube.
-layout(location = 0) uniform sampler2D u_Texture;
-`;
-
-}
-
-class OpeningFogGeometry {
-    public vertexBuffer: GfxBuffer;
-    public indexBuffer: GfxBuffer;
-    public indexCount: number;
-    public inputLayout: GfxInputLayout;
-
-    constructor(cache: GfxRenderCache) {
-        const device = cache.device;
-
-        // Vertex format [XYZ], [UV], [RGBA]
-        const vertexData = new Float32Array(17 * 17 * 9);
-
-        // X major in the original
-        for (let x = 0; x < 17; ++x) {
-            for (let y = 0; y < 17; ++y) {
-                const fVar10 = -5.0999994 - ((x * 2 - 16) * 6 * 0.5 + 3);
-                let fVar7 = -((y * 2 - 16) * 6 * 0.5 + 3);
-                fVar7 = ((72.12489 - Math.sqrt(fVar10 ** 2 + fVar7 ** 2) * 4) * 96) / 72.12489;
-                fVar7 = clamp(fVar7, 0, 127) >>> 0;
-
-                const vertOff = (x * 17 + y) * 9;
-                vertexData[vertOff] = x * 6 - 48;
-                vertexData[vertOff + 1] = x * 6 - 48;
-                vertexData[vertOff + 2] = 134;
-                vertexData[vertOff + 3] = x * 0.5;
-                vertexData[vertOff + 4] = y * 0.5; // Also a scroll for the shader
-                vertexData[vertOff + 5] = 0;
-                vertexData[vertOff + 6] = 0;
-                vertexData[vertOff + 7] = fVar7 / 255;
-                vertexData[vertOff + 8] = 128 / 255;
-            }
-        }
-
-        this.indexCount = 16 * 16 * 6;
-        const indexData = new Uint16Array(this.indexCount);
-
-        for (let x = 0; x < 16; ++x) {
-            for (let y = 0; y < 16; ++y) {
-                const indexOff = (x * 16 + y) * 6;
-                indexData[indexOff] = x * 17 + y;
-                indexData[indexOff + 1] = x * 17 + (y + 1);
-                indexData[indexOff + 2] = (x + 1) * 17 + y;
-                indexData[indexOff + 3] = (x + 1) * 17 + (y + 1);
-                indexData[indexOff + 4] = (x + 1) * 17 + y;
-                indexData[indexOff + 5] = x * 17 + (y + 1);
-            }
-        }
-
-        let temp = [
-            [0, 0],
-            [0, -1],
-            [1, 0]
-        ];
-        for (let i = 0; i < 3; ++i) {
-            const vertOff = i * 9;
-            vertexData[vertOff] = temp[i][0];
-            vertexData[vertOff + 1] = temp[i][1];
-            vertexData[vertOff + 2] = 0;
-            vertexData[vertOff + 3] = 0;
-            vertexData[vertOff + 4] = 0;
-            vertexData[vertOff + 5] = 0;
-            vertexData[vertOff + 6] = 0;
-            vertexData[vertOff + 7] = 0;
-            vertexData[vertOff + 8] = 0;
-        }
-
-        indexData[0] = 0;
-        indexData[1] = 1;
-        indexData[2] = 2;
-
-        this.indexCount = 3;
-
-        this.vertexBuffer = createBufferFromData(device, GfxBufferUsage.Vertex, GfxBufferFrequencyHint.Static, vertexData.buffer);
-        device.setResourceName(this.vertexBuffer, "OpeningFog (VB)");
-
-        this.indexBuffer = createBufferFromData(device, GfxBufferUsage.Index, GfxBufferFrequencyHint.Static, indexData.buffer);
-        device.setResourceName(this.indexBuffer, "OpeningFog (IB)");
-
-        this.inputLayout = cache.createInputLayout({
-            vertexAttributeDescriptors: [
-                {
-                    location: OpeningFogProgram.a_Position,
-                    format: GfxFormat.F32_RGB,
-                    bufferByteOffset: 0,
-                    bufferIndex: 0,
-                },
-                {
-                    location: OpeningFogProgram.a_TexCoord,
-                    format: GfxFormat.F32_RG,
-                    bufferByteOffset: 3 * 4,
-                    bufferIndex: 0,
-                },
-                {
-                    location: OpeningFogProgram.a_Color,
-                    format: GfxFormat.F32_RGBA,
-                    bufferByteOffset: 5 * 4,
-                    bufferIndex: 0,
-                },
-            ],
-
-            vertexBufferDescriptors: [
-                {
-                    byteStride: 9 * 4,
-                    frequency: GfxVertexBufferFrequency.PerVertex,
-                },
-            ],
-
-            indexBufferFormat: GfxFormat.U16_R,
-        });
-    }
-
-    public destroy(device: GfxDevice): void {
-        device.destroyBuffer(this.vertexBuffer);
-        device.destroyBuffer(this.indexBuffer);
+const scratchVec: vec3 = vec3.create();
+const scratchVec2: vec3 = vec3.create();
+const halfVec: vec3 = vec3.fromValues(0.5, 0.5, 0.5);
+const scratchMat: mat4 = mat4.create();
+
+function zeroMatrix(out: mat4) {
+    for (let i = 0; i < 16; ++i) {
+        out[i] = 0.0;
     }
 }
 
@@ -546,6 +75,7 @@ enum TextFadingState {
  * and linear interpolated with the previous to resolve the stable tick results
  */
 interface StableState {
+    frameCounter: number,
     cameraPosition: vec3,
     cameraRoll: number,
     sceTextAlpha: number,
@@ -554,6 +84,7 @@ interface StableState {
 
 function makeStableState(): StableState {
     return {
+        frameCounter: 0,
         cameraPosition: vec3.create(),
         cameraRoll: 0,
         sceTextAlpha: 0,
@@ -562,6 +93,7 @@ function makeStableState(): StableState {
 }
 
 function transferStableState(to: StableState, from: StableState) {
+    to.frameCounter = from.frameCounter;
     vec3.copy(to.cameraPosition, from.cameraPosition);
     to.cameraRoll = from.cameraRoll;
     to.sceTextAlpha = from.sceTextAlpha;
@@ -569,43 +101,61 @@ function transferStableState(to: StableState, from: StableState) {
 }
 
 function interpolateStableState(out: StableState, a: StableState, b: StableState, alpha: number) {
+    out.frameCounter = lerp(a.frameCounter, b.frameCounter, alpha);
     vec3.lerp(out.cameraPosition, a.cameraPosition, b.cameraPosition, alpha);
     out.cameraRoll = lerp(a.cameraRoll, b.cameraRoll, alpha);
     out.sceTextAlpha = lerp(a.sceTextAlpha, b.sceTextAlpha, alpha);
     out.warningTextAlpha = lerp(a.warningTextAlpha, b.warningTextAlpha, alpha);
 }
 
-class BIOSScene implements SceneGfx {
-    private renderHelper: GfxRenderHelper;
+/**
+ * Provide BIOS camera animation via the camera controller infrastructure.
+ * The user has the ability to take over at any time.
+ */
+export class BIOSCameraController extends FPSCameraController {
+    private sceneTime: number = 0;
+    private didInit: boolean = false;
+    constructor(private scene: BIOSScene) {
+        super();
+    }
+
+    public override update(inputManager: InputManager, dt: number, sceneTimeScale: number): CameraUpdateResult {
+        const deltaTime = dt * sceneTimeScale / 1000;
+        this.sceneTime += deltaTime;
+
+        this.scene.tick(this.sceneTime);
+        if (!this.didInit) {
+            this.scene.updateCameraMatrix(this.camera.worldMatrix);
+            this.setKeyMoveSpeed(2);
+            this.didInit = true;
+        }
+        super.update(inputManager, dt, sceneTimeScale);
+        this.camera.worldMatrixUpdated();
+        //console.log(`${this.camera.worldMatrix[12]}, ${this.camera.worldMatrix[13]}, ${this.camera.worldMatrix[14]}`);
+
+        // Set result to unchanged to prevent needless savestate creation during playback.
+        return CameraUpdateResult.Unchanged;
+    }
+}
+
+class BIOSScene implements SceneGfx, RenderInterface {
+    public renderHelper: GfxRenderHelper;
 
     // The renderInstList contains all of the objects we'll draw every frame.
-    private renderInstList = new GfxRenderInstList();
-
-    // Here's our cube! This just contains the vertex data.
-    private cubeGeometry: CubeGeometry;
-
-    // The shader program for our cube object.
-    private cubeProgram: GfxProgram;
-    // The texture for our cube.
-    private cubeTexture: GfxTexture | null = null;
-
-    private openingFogGeometry: OpeningFogGeometry;
-    private openingFogProgram: GfxProgram;
+    public renderInstList = new GfxRenderInstList();
 
     // The sampler for our cube, and for post-processing.
-    private linearSampler: GfxSampler;
+    public linearSampler: GfxSampler;
 
-    // The shader program for our post-processing shader.
-    private postprocessingProgram: GfxProgram;
-
-    // Post-Processing Toggle (Render Setting)
-    public enablePostProcessing = false;
-    public aberrationStrength = 0.2;
+    private towersGeometry: TowersGeometry;
+    private openingFogGeometry: OpeningFogGeometry;
 
     public textureHolder = new FakeTextureHolder([]);
 
     private osdSnd: OsdSnd;
     private sequenceStates: Map<ResourceID, SequenceState> = new Map<ResourceID, SequenceState>();
+
+    private mcHistory: MCHistoryEntry[];
 
     constructor(private sceneContext: SceneContext, private biosROM: BIOSROM) {
         this.osdSnd = new OsdSnd();
@@ -631,14 +181,8 @@ class BIOSScene implements SceneGfx {
         // wil get destroyed automatically later.
         const cache = this.renderHelper.renderCache;
 
-        this.cubeGeometry = new CubeGeometry(cache);
-
-        // Compile our shader programs to the GPU.
-        this.cubeProgram = cache.createProgram(new CubeProgram());
-        this.postprocessingProgram = cache.createProgram(new PostProcessingProgram());
-
-        this.openingFogGeometry = new OpeningFogGeometry(cache);
-        this.openingFogProgram = cache.createProgram(new OpeningFogProgram());
+        this.towersGeometry = new TowersGeometry(cache, this.biosROM);
+        this.openingFogGeometry = new OpeningFogGeometry(cache, this.biosROM);
 
         // Samplers define how exactly textures are sampled; in this case, we want linear filtering,
         // and we want UVs that are out of bounds to clamp rather than repeat.
@@ -650,206 +194,23 @@ class BIOSScene implements SceneGfx {
             wrapT: GfxWrapMode.Clamp,
         });
 
-        // Start the texture loading (async)
-        this.fetchTexture();
+        const playerSimulationParams: PlayerSimulationParams = {
+            numGames: 5,
+            numSessions: 20000,
+            gameSlotAllocationSeed: 100,
+            favoriteDistributionSeed: 1234,
+            gameSelectionSeed: 5678,
+        };
+        this.mcHistory = simulatePlayer(playerSimulationParams);
 
         // Give audio context some time to start
         setTimeout(() => this.osdSnd.startSeq(assertExists(this.sequenceStates.get(ResourceID.SNDCLOKS))), 200);
     }
 
-    private async fetchTexture() {
-        // Mandrill is taken from image 4.2.03 of the USC SIPI Image Database:
-        // https://sipi.usc.edu/database/database.php?volume=misc
-
-        // fetchData returns an ArrayBufferSlice containing our data.
-        // ArrayBufferSlice is a wrapper around ArrayBuffer with various helper methods.
-        const mandrillJPEG = await this.sceneContext.dataFetcher.fetchData(`${pathBase}/mandrill.jpg`);
-
-        // Use the web API "createImageBitmap" to load the JPEG, by way of a Blob.
-        // ImageBitmap represents a kind of image that's optimized for GPU drawing.
-        // https://developer.mozilla.org/en-US/docs/Web/API/Window/createImageBitmap
-        // https://developer.mozilla.org/en-US/docs/Web/API/Blob
-        const mandrillBlob = new Blob([mandrillJPEG.createTypedArray(Uint8Array)]);
-        const imageBitmap = await createImageBitmap(mandrillBlob);
-
-        // Now create a GfxTexture for the image bitmap.
-        const device = this.renderHelper.device;
-        this.cubeTexture = makeImageBitmapTexture2D(device, imageBitmap);
-        device.setResourceName(this.cubeTexture, 'mandrill.jpg');
-
-        // Display the Mandrill texture in the Texture List on the left-hand side.
-        this.textureHolder.viewerTextures.push({ gfxTexture: this.cubeTexture });
-        this.textureHolder.onnewtextures();
-    }
-
     private fillSceneParams(template: GfxRenderInst, viewerInput: ViewerRenderInput): void {
-        // Set up the scene parameter uniform block. We need to manually count the size here, which is a bit annoying.
-        // In this case, we know that ub_SceneParams contains a single Mat4x4, and a single Mat4x4 is 16 floats.
-        const data = template.allocateUniformBufferF32(CubeProgram.ub_SceneParams, 16);
+        const data = template.allocateUniformBufferF32(BaseProgram.ub_SceneParams, 16);
         let offs = 0;
-
-        // Upload the camera's clipFromWorldMatrix to the uniform buffer.
         offs += fillMatrix4x4(data, offs, viewerInput.camera.clipFromWorldMatrix);
-    }
-
-    private renderCube(time: number): void {
-        // If the texture is still loading, don't render yet!
-        if (this.cubeTexture === null)
-            return;
-
-        const renderInst = this.renderHelper.renderInstManager.newRenderInst();
-
-        renderInst.setGfxProgram(this.cubeProgram);
-        // Set our texture and sampler parameters.
-        renderInst.setSamplerBindings(0, [
-            { gfxTexture: this.cubeTexture, gfxSampler: this.linearSampler }
-        ]);
-
-        // Set our vertex attributes. For each buffer in the input layout, we need to pass a buffer binding here.
-        // Additionally, if we're using a buffer
-        renderInst.setVertexInput(
-            this.cubeGeometry.inputLayout,
-            [{ buffer: this.cubeGeometry.vertexBuffer, byteOffset: 0 }],
-            { buffer: this.cubeGeometry.indexBuffer, byteOffset: 0 },
-        );
-
-        // Our cube has 36 vertices. This is a separate parameter because it's actually possible to draw different
-        // ranges of the same index buffer.
-        renderInst.setDrawCount(this.cubeGeometry.indexCount);
-
-        // Create a transform for our cube.
-        const cubeMatrix = mat4.create();
-        // Move it back a bit.
-        mat4.translate(cubeMatrix, cubeMatrix, [0, 0, -400]);
-        // Rotate it over time.
-        mat4.rotateX(cubeMatrix, cubeMatrix, time * 0.0007);
-        mat4.rotateY(cubeMatrix, cubeMatrix, time * 0.0003);
-        // Scale up our cube by 50 to make it larger on the screen.
-        mat4.scale(cubeMatrix, cubeMatrix, [50, 50, 50]);
-
-        // Now upload our cube's parameter data to the GPU, which is our matrix.
-        // This is a Mat3x4, which is 3 groups of 4 floats.
-        const cubeParams = renderInst.allocateUniformBufferF32(CubeProgram.ub_CubeParams, 12);
-        let offs = 0;
-        offs += fillMatrix4x3(cubeParams, offs, cubeMatrix);
-
-        // Turn on backface culling. This is one of the fixed-function settings available through the MegaStateFlags.
-        renderInst.setMegaStateFlags({ cullMode: GfxCullMode.Back });
-
-        // Now that we're done setting up our render object, we can add it to our list of objects...
-        this.renderInstList.submitRenderInst(renderInst);
-    }
-
-    private renderOpeningFog(time: number): void {
-        const passTextureIDs = [
-            ResourceID.TEXOFOG4,
-            ResourceID.TEXOFOG2,
-            ResourceID.TEXOFOG1,
-            ResourceID.TEXOFOG4,
-            ResourceID.TEXOFOG2,
-            ResourceID.TEXOFOG1,
-        ];
-
-        for (let p = 0; p < 6; ++p) {
-            const renderInst = this.renderHelper.renderInstManager.newRenderInst();
-
-            const passTexture = assertExists(this.biosROM.textures.get(passTextureIDs[p]));
-
-            renderInst.setGfxProgram(this.openingFogProgram);
-
-            renderInst.setSamplerBindings(0, [
-                {gfxTexture: passTexture.gfxTexture, gfxSampler: this.linearSampler}
-            ]);
-
-            renderInst.setVertexInput(
-                this.openingFogGeometry.inputLayout,
-                [{buffer: this.openingFogGeometry.vertexBuffer, byteOffset: 0}],
-                {buffer: this.openingFogGeometry.indexBuffer, byteOffset: 0},
-            );
-
-            renderInst.setDrawCount(this.openingFogGeometry.indexCount);
-
-            // Create a transform for our cube.
-            const fogMatrix = mat4.create();
-            // Move it back a bit.
-            mat4.translate(fogMatrix, fogMatrix, [0, 0, 0 - p * 5]);
-            // Rotate it over time.
-            //mat4.rotateX(fogMatrix, fogMatrix, time * 0.0007);
-            //mat4.rotateY(fogMatrix, fogMatrix, time * 0.0003);
-            // Scale up our cube by 50 to make it larger on the screen.
-            mat4.scale(fogMatrix, fogMatrix, [50, 50, 50]);
-
-            // Now upload our cube's parameter data to the GPU, which is our matrix.
-            // This is a Mat3x4, which is 3 groups of 4 floats.
-            const openingFogParams = renderInst.allocateUniformBufferF32(OpeningFogProgram.ub_OpeningFogParams, 12);
-            let offs = 0;
-            offs += fillMatrix4x3(openingFogParams, offs, fogMatrix);
-
-            // Turn on backface culling. This is one of the fixed-function settings available through the MegaStateFlags.
-            renderInst.setMegaStateFlags({cullMode: GfxCullMode.None});
-
-            // Now that we're done setting up our render object, we can add it to our list of objects...
-            this.renderInstList.submitRenderInst(renderInst);
-        }
-    }
-
-    private pushPostProcessingPass(builder: GfxrGraphBuilder, mainColorTargetID: GfxrRenderTargetID): void {
-        // In order to use post-processing, we need to copy the texture we just rendered to so we can sample
-        // it in our post-processing shader. We do this with "resolve textures"; this ID is a handle we can later
-        // redeem inside our pass's execute function for a GfxTexture.
-        const mainColorResolveTextureID = builder.resolveRenderTarget(mainColorTargetID);
-        builder.pushPass((pass) => {
-            pass.setDebugName("Post-Processing");
-
-            pass.attachRenderTargetID(GfxrAttachmentSlot.Color0, mainColorTargetID);
-            // We need to attach the resolve texture to the pass for it to do the accounting correctly.
-            pass.attachResolveTexture(mainColorResolveTextureID);
-
-            // Now set up a draw call where we do our post-processing.
-            const renderInst = this.renderHelper.renderInstManager.newRenderInst();
-
-            // We use a single texture, and no uniform buffers.
-            renderInst.setBindingLayouts([
-                { numSamplers: 1, numUniformBuffers: 1 },
-            ]);
-
-            renderInst.setGfxProgram(this.postprocessingProgram);
-
-            // Fill in the data for ub_PostProcessingParams. Note that uniform buffer data must always be allocated
-            // outside of the pass.exec() function.
-            const data = renderInst.allocateUniformBufferF32(PostProcessingProgram.ub_PostProcessingParams, 4);
-            let offs = 0;
-            offs += fillVec4(data, offs, this.aberrationStrength);
-
-            // We use a special trick where we don't need any vertex inputs,
-            // we instead invent the vertices in the vertex shader.
-            renderInst.setVertexInput(null, null, null);
-
-            // We draw a single full-screen triangle, which is composed of 3 vertices.
-            renderInst.setDrawCount(3);
-
-            // The mega state flags contain all of the fixed-function state for this draw;
-            // in this case there's a good default you can use for full-screen passes.
-            renderInst.setMegaStateFlags(fullscreenMegaState);
-
-            pass.exec((passRenderer, scope) => {
-                // Redeem our resolve texture ID for a proper texture.
-                const mainColorTexture = scope.getResolveTextureForID(mainColorResolveTextureID);
-
-                // Note that this would become a bit more complicated if we wanted to add a uniform buffer,
-                // as we can't allocate uniform data inside an exec() function; we require that all uniform
-                // data is submitted early in the frame.
-
-                // Render our triangle with the main color texture.
-                renderInst.setSamplerBindings(0, [{
-                    gfxTexture: mainColorTexture,
-                    gfxSampler: this.linearSampler,
-                }]);
-
-                // Now submit the draw to the pass.
-                renderInst.drawOnPass(this.renderHelper.renderCache, passRenderer);
-            });
-        });
     }
 
     static readonly STABLE_TICK_RATE = 1.0 / 60.0;
@@ -867,12 +228,12 @@ class BIOSScene implements SceneGfx {
     private sceTextState: TextFadingState = TextFadingState.DoneFading;
     private warningTextState: TextFadingState = TextFadingState.DoneFading;
 
-    private cameraPosition_dx_dt: vec3 = vec3.create();
-    private cameraPosition_ddx_dt: vec3 = vec3.create();
-    private cameraPosition_dddx_dt: vec3 = vec3.create();
+    private cameraPosition_d: vec3 = vec3.create();
+    private cameraPosition_dd: vec3 = vec3.create();
+    private cameraPosition_ddd: vec3 = vec3.create();
 
-    private cameraRoll_dx_dt: number = 0;
-    private cameraRoll_ddx_dt: number = 0;
+    private cameraRoll_d: number = 0;
+    private cameraRoll_dd: number = 0;
 
     private animationReadyForTransitionToNextScreen: boolean = false;
     private fadeWarningTextOut: boolean = false;
@@ -881,16 +242,424 @@ class BIOSScene implements SceneGfx {
 
     private openingInitAnimation() {
         this.animationProcessingState = AnimationProcessingState.Zero;
-        vec3.set(this.cameraPosition_dx_dt, 0, 0, 0.004);
-        vec3.set(this.cameraPosition_ddx_dt, 0, 0, 0);
-        this.cameraPosition_dddx_dt[2] = 0.0;
-        this.cameraRoll_dx_dt = 0.001;
-        this.cameraRoll_ddx_dt = 0.0;
+        vec3.set(this.cameraPosition_d, 0, 0, 0.004);
+        vec3.set(this.cameraPosition_dd, 0, 0, 0);
+        this.cameraPosition_ddd[2] = 0.0;
+        this.cameraRoll_d = 0.001;
+        this.cameraRoll_dd = 0.0;
         this.animationReadyForTransitionToNextScreen = false;
     }
 
-    private openingInitTowersFog() {
+    private towerGridTranslations: vec3[] = nArray(NUM_TOWERS, vec3.create);
+    private towerGridZDisplacements1: number[] = nArray(NUM_TOWERS, () => { return 0.0; });
+    private towerGridZDisplacements2: number[] = nArray(NUM_TOWERS, () => { return 0.0; });
+    private towerGridZScales: number[] = nArray(NUM_TOWERS, () => { return 0.0; });
+    private towerGridZDisplacedColorMultiplier: number[] = nArray(NUM_TOWERS, () => { return 0.0; });
+    private towerEnabled: boolean[] = nArray(NUM_TOWERS, () => { return false; });
 
+    static readonly TOWER_GRID_BASE_TRANSLATIONS: number[] = [
+        -137428 / 10000, 117512 / 10000, -25366 / 10000,
+        -137428 / 10000, 104512 / 10000, -25366 / 10000,
+        -137428 / 10000, 91512 / 10000, -25366 / 10000,
+        -131428 / 10000, 78512 / 10000, -25366 / 10000,
+        -137428 / 10000, 65512 / 10000, -65517 / 10000,
+        -137428 / 10000, 52512 / 10000, -25366 / 10000,
+        -137428 / 10000, 39512 / 10000, -25366 / 10000,
+        -137428 / 10000, 26512 / 10000, -25366 / 10000,
+        -137428 / 10000, 13512 / 10000, -25366 / 10000,
+        -124428 / 10000, 117512 / 10000, -25366 / 10000,
+        -124428 / 10000, 104512 / 10000, -25366 / 10000,
+        -124428 / 10000, 91512 / 10000, -25366 / 10000,
+        -121428 / 10000, 78512 / 10000, -9330 / 10000,
+        -124428 / 10000, 65512 / 10000, -25366 / 10000,
+        -124428 / 10000, 52512 / 10000, -25366 / 10000,
+        -124428 / 10000, 39512 / 10000, -25366 / 10000,
+        -124428 / 10000, 26512 / 10000, -25366 / 10000,
+        -124428 / 10000, 13512 / 10000, -25366 / 10000,
+        -111428 / 10000, 117512 / 10000, -25366 / 10000,
+        -111428 / 10000, 104512 / 10000, -25366 / 10000,
+        -111428 / 10000, 91512 / 10000, -32422 / 10000,
+        -111428 / 10000, 78512 / 10000, -25366 / 10000,
+        -111428 / 10000, 65512 / 10000, -31781 / 10000,
+        -111428 / 10000, 52512 / 10000, -25366 / 10000,
+        -111428 / 10000, 39512 / 10000, -25366 / 10000,
+        -111428 / 10000, 26512 / 10000, -25366 / 10000,
+        -111428 / 10000, 13512 / 10000, -25366 / 10000,
+        -98428 / 10000, 117512 / 10000, -25366 / 10000,
+        -98428 / 10000, 104512 / 10000, -25366 / 10000,
+        -98428 / 10000, 91512 / 10000, -25366 / 10000,
+        -98428 / 10000, 78512 / 10000, -33705 / 10000,
+        -98428 / 10000, 65512 / 10000, -40119 / 10000,
+        -98428 / 10000, 52512 / 10000, -25366 / 10000,
+        -98428 / 10000, 39512 / 10000, -25366 / 10000,
+        -98428 / 10000, 26512 / 10000, -25366 / 10000,
+        -98428 / 10000, 13512 / 10000, -32422 / 10000,
+        -85428 / 10000, 117512 / 10000, -25366 / 10000,
+        -85428 / 10000, 104512 / 10000, -25366 / 10000,
+        -85428 / 10000, 91512 / 10000, -25366 / 10000,
+        -85428 / 10000, 78512 / 10000, -54054 / 10000,
+        -85428 / 10000, 65512 / 10000, -44491 / 10000,
+        -85428 / 10000, 52512 / 10000, -25366 / 10000,
+        -85428 / 10000, 39512 / 10000, -35629 / 10000,
+        -85428 / 10000, 26512 / 10000, -25366 / 10000,
+        -85428 / 10000, 13512 / 10000, -25366 / 10000,
+        -72428 / 10000, 117512 / 10000, -25366 / 10000,
+        -72428 / 10000, 104512 / 10000, -25366 / 10000,
+        -72428 / 10000, 91512 / 10000, -25366 / 10000,
+        -72428 / 10000, 78512 / 10000, -54097 / 10000,
+        -72428 / 10000, 65512 / 10000, -38195 / 10000,
+        -72428 / 10000, 52512 / 10000, -25366 / 10000,
+        -72428 / 10000, 39512 / 10000, -35629 / 10000,
+        -72428 / 10000, 26512 / 10000, -25366 / 10000,
+        -72428 / 10000, 13512 / 10000, -25366 / 10000,
+        -59428 / 10000, 117512 / 10000, -25366 / 10000,
+        -59428 / 10000, 104512 / 10000, -25366 / 10000,
+        -59428 / 10000, 91512 / 10000, -25366 / 10000,
+        -59428 / 10000, 78512 / 10000, -33705 / 10000,
+        -59428 / 10000, 65512 / 10000, -44491 / 10000,
+        -59428 / 10000, 52512 / 10000, -38195 / 10000,
+        -59428 / 10000, 39512 / 10000, -309 / 10000,
+        -59428 / 10000, 26512 / 10000, -25366 / 10000,
+        -59428 / 10000, 13512 / 10000, -25366 / 10000,
+        -46428 / 10000, 117512 / 10000, -25366 / 10000,
+        -46428 / 10000, 104512 / 10000, -25366 / 10000,
+        -46428 / 10000, 91512 / 10000, -25366 / 10000,
+        -46428 / 10000, 78512 / 10000, -25366 / 10000,
+        -46428 / 10000, 65512 / 10000, -38195 / 10000,
+        -46428 / 10000, 52512 / 10000, -25366 / 10000,
+        -46428 / 10000, 39512 / 10000, -25366 / 10000,
+        -46428 / 10000, 26512 / 10000, -45251 / 10000,
+        -46428 / 10000, 13512 / 10000, -25366 / 10000,
+        -33428 / 10000, 117512 / 10000, -25366 / 10000,
+        -33428 / 10000, 104512 / 10000, -25366 / 10000,
+        -33428 / 10000, 91512 / 10000, -50383 / 10000,
+        -33428 / 10000, 78512 / 10000, -45892 / 10000,
+        -33428 / 10000, 65512 / 10000, -35629 / 10000,
+        -33428 / 10000, 52512 / 10000, -45766 / 10000,
+        -33428 / 10000, 39512 / 10000, -28536 / 10000,
+        -33428 / 10000, 26512 / 10000, -6190 / 10000,
+        -33428 / 10000, 13512 / 10000, -25366 / 10000,
+        -20428 / 10000, 117512 / 10000, -25366 / 10000,
+        -20428 / 10000, 104512 / 10000, -25366 / 10000,
+        -20428 / 10000, 91512 / 10000, -25366 / 10000,
+        -20428 / 10000, 78512 / 10000, -25366 / 10000,
+        -20428 / 10000, 65512 / 10000, -33654 / 10000,
+        -20428 / 10000, 52512 / 10000, -28799 / 10000,
+        -20428 / 10000, 39512 / 10000, -25366 / 10000,
+        -20428 / 10000, 26512 / 10000, -25366 / 10000,
+        -20428 / 10000, 13512 / 10000, -25366 / 10000,
+        -7428 / 10000, 117512 / 10000, -25366 / 10000,
+        -7428 / 10000, 104512 / 10000, -25366 / 10000,
+        -7428 / 10000, 91512 / 10000, 7348 / 10000,
+        -7428 / 10000, 78512 / 10000, -25366 / 10000,
+        -7428 / 10000, 65512 / 10000, -25366 / 10000,
+        -7428 / 10000, 52512 / 10000, -28554 / 10000,
+        -7428 / 10000, 39512 / 10000, -42670 / 10000,
+        -7428 / 10000, 26512 / 10000, -25366 / 10000,
+        -7428 / 10000, 13512 / 10000, -25366 / 10000,
+        5572 / 10000, 117512 / 10000, -25366 / 10000,
+        5572 / 10000, 104512 / 10000, -25366 / 10000,
+        5572 / 10000, 91512 / 10000, -25366 / 10000,
+        5572 / 10000, 78512 / 10000, -30466 / 10000,
+        5572 / 10000, 65512 / 10000, -36204 / 10000,
+        5572 / 10000, 52512 / 10000, -28554 / 10000,
+        5572 / 10000, 39512 / 10000, -25366 / 10000,
+        5572 / 10000, 26512 / 10000, -25366 / 10000,
+        5572 / 10000, 13512 / 10000, -25366 / 10000,
+        18572 / 10000, 117512 / 10000, -25366 / 10000,
+        18572 / 10000, 104512 / 10000, -25366 / 10000,
+        18572 / 10000, 91512 / 10000, -25366 / 10000,
+        18572 / 10000, 78512 / 10000, -25366 / 10000,
+        18572 / 10000, 65512 / 10000, -25366 / 10000,
+        18572 / 10000, 52512 / 10000, -31741 / 10000,
+        18572 / 10000, 39512 / 10000, -25366 / 10000,
+        18572 / 10000, 26512 / 10000, -25366 / 10000,
+        18572 / 10000, 13512 / 10000, -25366 / 10000,
+        31572 / 10000, 117512 / 10000, -25366 / 10000,
+        31572 / 10000, 104512 / 10000, -25366 / 10000,
+        31572 / 10000, 91512 / 10000, -25366 / 10000,
+        31572 / 10000, 78512 / 10000, -25366 / 10000,
+        31572 / 10000, 65512 / 10000, -25366 / 10000,
+        31572 / 10000, 52512 / 10000, -25366 / 10000,
+        31572 / 10000, 39512 / 10000, -25366 / 10000,
+        31572 / 10000, 26512 / 10000, -25366 / 10000,
+        31572 / 10000, 13512 / 10000, -25366 / 10000,
+    ];
+
+    static readonly TOWER_GRID_COORDINATE_ALLOCATION_TABLE: number[] = [
+        0, 0,
+        0, 1,
+        0, 2,
+        0, 3,
+        1, 0,
+        1, 1,
+
+        1, 2,
+        2, 0,
+        2, 1,
+        2, 2,
+        3, 0,
+        4, 0,
+
+        4, 1,
+        5, 0,
+        5, 1,
+        6, 0,
+        6, 1,
+        6, 2,
+
+        7, 0,
+        7, 1,
+        8, 0,
+        8, 1,
+        8, 2,
+        8, 3,
+
+        9, 0,
+        9, 1,
+        10, 0,
+        10, 1,
+        10, 2,
+        11, 0,
+
+        12, 0,
+        12, 1,
+        13, 0,
+        13, 1,
+        13, 2,
+        13, 3,
+
+        1, 3,
+        2, 3,
+        3, 1,
+        3, 2,
+        3, 3,
+        4, 2,
+
+        5, 2,
+        5, 3,
+        5, 4,
+        6, 3,
+        7, 2,
+        7, 3,
+
+        9, 2,
+        9, 3,
+        9, 5,
+        10, 3,
+        10, 4,
+        10, 5,
+
+        11, 1,
+        11, 2,
+        11, 3,
+        11, 4,
+        12, 2,
+        12, 3,
+
+        0, 4,
+        1, 4,
+        2, 4,
+        2, 5,
+        2, 6,
+        3, 4,
+
+        3, 5,
+        3, 6,
+        4, 3,
+        4, 4,
+        4, 5,
+        4, 6,
+
+        5, 5,
+        5, 6,
+        6, 4,
+        6, 5,
+        7, 4,
+        7, 5,
+
+        8, 4,
+        8, 5,
+        8, 6,
+        9, 4,
+        9, 6,
+        9, 7,
+
+        12, 4,
+        13, 4,
+        13, 5,
+        13, 6,
+        13, 7,
+        13, 8,
+
+        0, 5,
+        0, 6,
+        1, 5,
+        1, 6,
+        1, 7,
+        2, 7,
+
+        0, 7,
+        0, 8,
+        1, 8,
+        2, 8,
+        3, 7,
+        3, 8,
+
+        4, 7,
+        4, 8,
+        5, 7,
+        5, 8,
+        6, 6,
+        6, 7,
+
+        6, 8,
+        7, 6,
+        7, 7,
+        7, 8,
+        8, 7,
+        8, 8,
+
+        9, 8,
+        10, 6,
+        10, 7,
+        10, 8,
+        11, 7,
+        11, 8,
+
+        11, 5,
+        11, 6,
+        12, 5,
+        12, 6,
+        12, 7,
+        12, 8,
+    ];
+
+    static readonly BASE_TOWER_VERTEX_Z_DISPLACEMENTS_1: number[] = [
+        0.1, 0.1, 0.1, 0.1, 0.1, 0.2, 0.3, 0.4, 0.5, 0.6, 0.7, 0.8, 0.9, 1.0
+    ];
+
+    static readonly BASE_TOWER_VERTEX_Z_DISPLACEMENTS_2: number[] = [
+        0.2, 0.4, 0.6, 0.8, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0
+    ];
+
+    private openingInitTowersFog() {
+        for (let i = 0; i < NUM_TOWERS; ++i) {
+            this.towerEnabled[i] = false;
+        }
+
+        for (let historyIdx = 0; historyIdx < NUM_HISTORY_SLOTS; ++historyIdx) {
+            const history = this.mcHistory[historyIdx];
+            if (!history.allocated) {
+                continue;
+            }
+
+            for (let histTowerIdx = 0; histTowerIdx < 6; ++histTowerIdx) {
+                const coordTableIdx = historyIdx * (2*6) + histTowerIdx * 2;
+                const x = BIOSScene.TOWER_GRID_COORDINATE_ALLOCATION_TABLE[coordTableIdx];
+                const y = BIOSScene.TOWER_GRID_COORDINATE_ALLOCATION_TABLE[coordTableIdx + 1];
+                const towerIdx = x * TOWER_GRID_HEIGHT + y;
+                if (history.lastSetProgressBit === histTowerIdx) {
+                    if (history.launchCount < 14) {
+                        this.towerGridZDisplacements1[towerIdx] = BIOSScene.BASE_TOWER_VERTEX_Z_DISPLACEMENTS_1[history.launchCount];
+                        this.towerGridZDisplacements2[towerIdx] = BIOSScene.BASE_TOWER_VERTEX_Z_DISPLACEMENTS_2[history.launchCount];
+                    } else {
+                        const modLaunchCount = (history.launchCount - 14) % 10 + 4;
+                        this.towerGridZDisplacements1[towerIdx] = BIOSScene.BASE_TOWER_VERTEX_Z_DISPLACEMENTS_1[modLaunchCount];
+                        this.towerGridZDisplacements2[towerIdx] = BIOSScene.BASE_TOWER_VERTEX_Z_DISPLACEMENTS_2[modLaunchCount];
+                    }
+                    this.towerEnabled[towerIdx] = true;
+                } else if ((history.randomProgressBits >>> histTowerIdx) & 1) {
+                    this.towerGridZDisplacements1[towerIdx] = 1.0;
+                    this.towerGridZDisplacements2[towerIdx] = 1.0;
+                    this.towerEnabled[towerIdx] = true;
+                }
+            }
+        }
+
+        for (let x = 0; x < TOWER_GRID_WIDTH; ++x) {
+            for (let y = 0; y < TOWER_GRID_HEIGHT; ++y) {
+                const towerIdx = x * TOWER_GRID_HEIGHT + y;
+                const translation = this.towerGridTranslations[towerIdx];
+                translation[0] = (BIOSScene.TOWER_GRID_BASE_TRANSLATIONS[towerIdx * 3] + 4.8) * 4;
+                translation[1] = (BIOSScene.TOWER_GRID_BASE_TRANSLATIONS[towerIdx * 3 + 1] - 6.5) * 4;
+                translation[2] = (BIOSScene.TOWER_GRID_BASE_TRANSLATIONS[towerIdx * 3 + 2] + 4) * 12 + 150;
+            }
+        }
+
+        for (let x = 0; x < TOWER_GRID_WIDTH; ++x) {
+            for (let y = 0; y < TOWER_GRID_HEIGHT; ++y) {
+                const towerIdx = x * TOWER_GRID_HEIGHT + y;
+                const translation = this.towerGridTranslations[towerIdx];
+                const zDisplacement1 = this.towerGridZDisplacements1[towerIdx];
+                const zDisplacement2 = this.towerGridZDisplacements2[towerIdx];
+                const zDisplacementFinal = Math.max(3, zDisplacement1 * 30);
+                translation[2] += zDisplacement2 * 30 - zDisplacementFinal;
+                this.towerGridZScales[towerIdx] = zDisplacementFinal / 30;
+                if (zDisplacement2 >= 1.0) {
+                    this.towerGridZDisplacements2[towerIdx] = 1.0;
+                    this.towerGridZDisplacedColorMultiplier[towerIdx] = 0;
+                } else {
+                    this.towerGridZDisplacedColorMultiplier[towerIdx] = ((1.0 - zDisplacement2) * 128) >>> 0;
+                }
+            }
+        }
+    }
+
+    private towerCameraManhattans: number[] = nArray(NUM_TOWERS, () => { return 0; });
+    private towerObjectMats: mat4[] = nArray(NUM_TOWERS, mat4.create);
+    private towerLightVectorMat: mat4 = mat4.create();
+    private towerObjectLightVectorMats: mat4[] = nArray(NUM_TOWERS, mat4.create);
+    private towerScreenMat: mat4 = mat4.create();
+    private eyeDirection: vec3 = vec3.create();
+    private eyeUpDirection: vec3 = vec3.create();
+
+    private tickOpeningTowers() {
+    }
+
+    private drawOpeningTowers() {
+        let maxCameraToTowerManhattan = 0;
+        for (let x = 0; x < TOWER_GRID_WIDTH; ++x) {
+            for (let y = 0; y < TOWER_GRID_HEIGHT; ++y) {
+                const towerIdx = x * TOWER_GRID_HEIGHT + y;
+                const towerVector = this.towerGridTranslations[towerIdx];
+                const towerCameraDelta = vec3.sub(scratchVec, towerVector, this.tickStableState.cameraPosition);
+                const towerCameraManhattan = Math.abs(towerCameraDelta[0]) + Math.abs(towerCameraDelta[1]);
+                this.towerCameraManhattans[towerIdx] = towerCameraManhattan;
+                if (towerCameraManhattan > maxCameraToTowerManhattan) {
+                    maxCameraToTowerManhattan = towerCameraManhattan + 1;
+                }
+            }
+        }
+
+        const animYaw = Math.sin((this.drawStableState.frameCounter % 360 - 180) * MathConstants.DEG_TO_RAD) * 10 * MathConstants.DEG_TO_RAD;
+
+        for (let x = 0; x < TOWER_GRID_WIDTH; ++x) {
+            for (let y = 0; y < TOWER_GRID_HEIGHT; ++y) {
+                const towerIdx = x * TOWER_GRID_HEIGHT + y;
+                if (!this.towerEnabled[towerIdx]) {
+                    zeroMatrix(this.towerObjectMats[towerIdx]);
+                    continue;
+                }
+
+                const xPlus3 = x + 3;
+                const yPlus6 = y + 6;
+                const yPlus7 = y + 7;
+
+                const iVar1 = (xPlus3 + yPlus6) * xPlus3 / yPlus7;
+                let yaw = (iVar1 - ((iVar1 + 3) >> 2 << 2)) * Math.PI / 2;
+                if (this.towerGridZDisplacements2[towerIdx] !== 1.0) {
+                    yaw += animYaw;
+                }
+
+                mat4.fromZRotation(this.towerObjectMats[towerIdx], yaw);
+                mat4.mul(this.towerObjectLightVectorMats[towerIdx], this.towerLightVectorMat, this.towerObjectMats[towerIdx]);
+                this.towerObjectMats[towerIdx][10] = this.towerGridZScales[towerIdx];
+                setMatrixTranslation(this.towerObjectMats[towerIdx], this.towerGridTranslations[towerIdx]);
+            }
+        }
+
+        this.towersGeometry.draw(this, this.towerObjectMats, this.towerObjectLightVectorMats);
     }
 
     private openingInit_0021e578() {
@@ -920,12 +689,156 @@ class BIOSScene implements SceneGfx {
         this.frameCounter = 0;
     }
 
-    private tickAnimation() {
+    private initCubes() {
 
     }
 
-    private tickOpeningScreen() {
+    private initLightsCubes() {
+        this.initCubes();
+    }
 
+    static normalLightMatrix(out: mat4, l0: vec3, l1: vec3, l2: vec3): mat4 {
+        vec3.normalize(scratchVec, l0);
+        out[0] = -scratchVec[0];
+        out[4] = -scratchVec[1];
+        out[8] = -scratchVec[2];
+        out[12] = 0.0;
+        vec3.normalize(scratchVec, l1);
+        out[1] = -scratchVec[0];
+        out[5] = -scratchVec[1];
+        out[9] = -scratchVec[2];
+        out[13] = 0.0;
+        vec3.normalize(scratchVec, l2);
+        out[2] = -scratchVec[0];
+        out[6] = -scratchVec[1];
+        out[10] = -scratchVec[2];
+        out[14] = 0.0;
+        out[3] = 0.0;
+        out[7] = 0.0;
+        out[11] = 0.0;
+        out[15] = 1.0;
+        return out;
+    }
+
+    static readonly LIGHT_VECTOR_0: vec3 = [0, 0, -1];
+    static readonly LIGHT_VECTOR_1: vec3 = [0.5, 0.5, 0];
+    static readonly LIGHT_VECTOR_2: vec3 = [-0.5, -0.5, 0];
+
+    private initOpeningScene() {
+        vec3.set(this.tickStableState.cameraPosition, 0, 0, 16);
+        this.tickStableState.cameraRoll = -0.12;
+
+        BIOSScene.normalLightMatrix(this.towerLightVectorMat, BIOSScene.LIGHT_VECTOR_0, BIOSScene.LIGHT_VECTOR_1, BIOSScene.LIGHT_VECTOR_2);
+        vec3.set(this.eyeDirection, 0, 0, 1);
+        vec3.set(this.eyeUpDirection, 0, 1, 0);
+
+        this.initLightsCubes();
+    }
+
+    static readonly CAMERA_Z_STATE_THRESHOLDS = [
+        16, 56, 104, 320, 672, 800, 1160, 1160
+    ];
+
+    private tickAnimation() {
+        let newOverallOpeningState = this.overallOpeningState;
+
+        if (this.tickStableState.cameraPosition[2] > BIOSScene.CAMERA_Z_STATE_THRESHOLDS[this.animationProcessingState]) {
+            this.animationProcessingState += 1;
+            console.log(`State ${this.animationProcessingState} at position ${this.tickStableState.cameraPosition[2]}`);
+        }
+
+        switch (this.animationProcessingState) {
+            case AnimationProcessingState.One:
+                // TODO: Boot ready logic
+                this.cameraPosition_ddd[2] = 4e-07;
+                break;
+                this.cameraRoll_d = 0.0004;
+                if (this.frameCounter < 20 * 60 / 6) {
+                    this.cameraPosition_dd[2] = -0.00014;
+                } else {
+                    this.cameraPosition_dd[2] = 2.5e-05;
+                }
+                if (this.frameCounter > 3 * 60) {
+                    this.animationProcessingState += 1;
+                    this.cameraPosition_dd[2] = 0.003;
+                }
+                break;
+            case AnimationProcessingState.Two:
+                // TODO: Clock transition logic
+                break;
+            case AnimationProcessingState.Three:
+                //newOverallOpeningState = this.overallOpeningState + 1;
+                break;
+            case AnimationProcessingState.Six:
+                this.cameraRoll_dd = 0;
+                vec3.zero(this.cameraPosition_d);
+                vec3.zero(this.cameraPosition_dd);
+                vec3.zero(this.cameraPosition_ddd);
+                // TODO: Warning screen logic
+                break;
+            case AnimationProcessingState.Seven:
+                newOverallOpeningState = OverallOpeningState.Done;
+                this.openingInitAnimation();
+                break;
+            default:
+                break;
+        }
+
+        this.cameraRoll_d += this.cameraRoll_dd;
+
+        vec3.add(this.cameraPosition_d,
+            this.cameraPosition_d,
+            vec3.mul(scratchVec,
+                vec3.add(scratchVec,
+                    vec3.add(scratchVec,
+                        this.cameraPosition_dd,
+                        this.cameraPosition_dd),
+                    this.cameraPosition_ddd),
+                halfVec));
+
+        this.cameraPosition_dd[2] += this.cameraPosition_ddd[2];
+
+        this.tickStableState.cameraRoll += (this.cameraRoll_d + this.cameraRoll_d + this.cameraRoll_dd) * 0.5;
+
+        vec3.add(this.tickStableState.cameraPosition,
+            this.tickStableState.cameraPosition,
+            vec3.mul(scratchVec,
+                vec3.add(scratchVec,
+                    vec3.add(scratchVec,
+                        this.cameraPosition_d,
+                        this.cameraPosition_d),
+                    this.cameraPosition_dd),
+                halfVec));
+
+        if (this.tickStableState.cameraRoll > Math.PI) {
+            this.tickStableState.cameraRoll -= Math.PI * 2;
+        } else if (this.tickStableState.cameraRoll < -Math.PI) {
+            this.tickStableState.cameraRoll += Math.PI * 2;
+        }
+
+        if (newOverallOpeningState !== this.overallOpeningState) {
+            this.screenProcessingState = this.screenProcessingState += 1;
+        }
+    }
+
+    private tickOpeningScreen() {
+        if (this.screenProcessingState === ScreenProcessingState.NeedsInit) {
+            this.initOpeningScene();
+            this.screenProcessingState = ScreenProcessingState.NeedsUpdate;
+        }
+
+        if (this.screenProcessingState === ScreenProcessingState.NeedsUpdate) {
+            this.tickOpeningTowers();
+        } else if (this.screenProcessingState === ScreenProcessingState.Done) {
+            this.requestedOverallOpeningState = OverallOpeningState.Done;
+            this.screenProcessingState = ScreenProcessingState.NeedsInit;
+        }
+    }
+
+    private drawOpeningScreen() {
+        if (this.screenProcessingState === ScreenProcessingState.NeedsUpdate) {
+            this.drawOpeningTowers();
+        }
     }
 
     private tickWarningScreen() {
@@ -1000,6 +913,8 @@ class BIOSScene implements SceneGfx {
      * Make all stable state accesses through this.tickStableState.
      */
     private stableTick() {
+        this.tickStableState.frameCounter = this.frameCounter;
+
         if (this.overallOpeningState === OverallOpeningState.InitForNoclip) {
             this.openingInit();
         }
@@ -1017,6 +932,7 @@ class BIOSScene implements SceneGfx {
 
         this.tickTextFade();
 
+        this.overallOpeningState = this.requestedOverallOpeningState;
         this.frameCounter += 1;
     }
 
@@ -1034,17 +950,18 @@ class BIOSScene implements SceneGfx {
             return;
         }
 
-        // TODO: Screens
+        this.drawOpeningScreen();
 
         this.drawTextFade();
 
         // TODO: Letterbox
     }
 
-    private tick(time: number) {
+    public tick(time: number) {
         if (this.lastStableTickTime === null) {
             this.stableTick();
             transferStableState(this.prevStableState, this.tickStableState);
+            transferStableState(this.drawStableState, this.prevStableState);
             this.lastStableTickTime = time;
             return;
         }
@@ -1053,9 +970,10 @@ class BIOSScene implements SceneGfx {
             this.stableTick();
             this.lastStableTickTime += BIOSScene.STABLE_TICK_RATE;
         }
+        this.interpolateDrawStableState(time);
     }
 
-    private draw(time: number) {
+    private interpolateDrawStableState(time: number) {
         const lastStableTickTime = assertExists(this.lastStableTickTime);
         assert(time <= lastStableTickTime);
 
@@ -1063,6 +981,14 @@ class BIOSScene implements SceneGfx {
         const alpha = clamp((time - prevStableTickTime) / BIOSScene.STABLE_TICK_RATE, 0.0, 1.0);
 
         interpolateStableState(this.drawStableState, this.prevStableState, this.tickStableState, alpha);
+    }
+
+    public updateCameraMatrix(cameraMatrix: mat4) {
+        vec3.add(scratchVec, this.drawStableState.cameraPosition, this.eyeDirection);
+        mat4.targetTo(cameraMatrix, this.drawStableState.cameraPosition, scratchVec, this.eyeUpDirection);
+    }
+
+    private draw() {
         this.stableDraw();
     }
 
@@ -1105,13 +1031,8 @@ class BIOSScene implements SceneGfx {
         // Fill in the ub_SceneParams uniform block. The viewerInput contains the viewer's camera.
         this.fillSceneParams(template, viewerInput);
 
-        // Render our cube.
-        //this.renderCube(viewerInput.time);
-
-        this.renderOpeningFog(viewerInput.time);
-
-        this.tick(viewerInput.time);
-        this.draw(viewerInput.time);
+        this.draw();
+        //this.renderHelper.debugDraw.screenPrintText(`${this.drawStableState.cameraPosition[2]}`, Green);
 
         // We could manually configure render passes using device.createRenderPass(), but we have a helper to
         // make writing render pass logic easier called the render graph; our render helper has one of them.
@@ -1144,10 +1065,7 @@ class BIOSScene implements SceneGfx {
             });
         });
 
-        if (this.enablePostProcessing) {
-            // If post-processing is enabled, then add it as a pass to our render graph.
-            this.pushPostProcessingPass(builder, mainColorTargetID);
-        }
+        // TODO: Blur pass
 
         // Remove our template that we pushed using pushTemplate() at the beginning of the function,
         // now that we've made all the render insts we need to.
@@ -1169,6 +1087,10 @@ class BIOSScene implements SceneGfx {
         builder.execute();
     }
 
+    public createCameraController(): CameraController {
+        return new BIOSCameraController(this);
+    }
+
     // noclip has a few different hooks it calls when the scene is constructed to hook into various parts
     // of its UI or rendering framework. When the scene is loaded, `createPanels()` is called, and the returned
     // panels are placed inside the list of panels on the left.
@@ -1178,18 +1100,6 @@ class BIOSScene implements SceneGfx {
         renderSettingsPanel.customHeaderBackgroundColor = UI.COOL_BLUE_COLOR;
         renderSettingsPanel.setTitle(UI.RENDER_HACKS_ICON, 'Render Settings');
 
-        const enablePostProcessingCheckbox = new UI.Checkbox('Enable Post-Processing', this.enablePostProcessing);
-        enablePostProcessingCheckbox.onchanged = () => {
-            this.enablePostProcessing = enablePostProcessingCheckbox.checked;
-        };
-        renderSettingsPanel.contents.appendChild(enablePostProcessingCheckbox.elem);
-
-        const aberrationStrengthSlider = new UI.Slider('Aberration Strength', this.aberrationStrength, 0.0, 1.0);
-        aberrationStrengthSlider.onvalue = () => {
-            this.aberrationStrength = aberrationStrengthSlider.getValue();
-        };
-        renderSettingsPanel.contents.appendChild(aberrationStrengthSlider.elem);
-
         return [renderSettingsPanel];
     }
 
@@ -1197,10 +1107,10 @@ class BIOSScene implements SceneGfx {
         // noclip's framework will call this destroy function when the user navigates away from your scene.
         // Destroy any graphics resources or do any cleanup logic you need to here.
         this.renderHelper.destroy();
-        this.cubeGeometry.destroy(device);
+        this.towersGeometry.destroy(device);
+        this.openingFogGeometry.destroy(device);
 
-        if (this.cubeTexture !== null)
-            device.destroyTexture(this.cubeTexture);
+        this.biosROM.destroy(device);
 
         this.osdSnd.stop().then(r => {});
     }

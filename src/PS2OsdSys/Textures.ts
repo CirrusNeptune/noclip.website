@@ -43,10 +43,10 @@ interface TextureInfo {
     mipCount: number,
     imageOffset: number,
     psm: OsdSysPixelStorageFormat,
-    clut?: ArrayBufferSlice,
+    clut?: Uint8Array,
 }
 
-const AA_TEXT_CLUT = ArrayBufferSlice.fromView(new Uint8Array([
+const AA_TEXT_CLUT = new Uint8Array([
     0x0,  0x0,  0x0,  0x0,
     0x11, 0x11, 0x11, 0x9,
     0x22, 0x22, 0x22, 0x11,
@@ -63,7 +63,7 @@ const AA_TEXT_CLUT = ArrayBufferSlice.fromView(new Uint8Array([
     0xDD, 0xDD, 0xDD, 0x6F,
     0xEE, 0xEE, 0xEE, 0x77,
     0xFF, 0xFF, 0xFF, 0x80
-]));
+]);
 
 const TEXTURE_INFOS: Map<ResourceID, TextureInfo> = new Map<ResourceID, TextureInfo>([
     // Opening Textures
@@ -154,8 +154,8 @@ function readPSMCT16Pixels(info: TextureInfo, data: ArrayBufferSlice, out: Uint8
     for (let i = 0; i < numPixels; ++i) {
         const p = data16[i];
         out[i * 4] = (p & 0x001F) << 3;
-        out[i * 4 + 1] = (p & 0x03E0) << 3;
-        out[i * 4 + 2] = (p & 0x7C00) << 3;
+        out[i * 4 + 1] = (p & 0x03E0) >>> 2;
+        out[i * 4 + 2] = (p & 0x7C00) >>> 7;
         out[i * 4 + 3] = (p >>> 15) ? 0xff : 0x00;
     }
 }
@@ -229,7 +229,7 @@ function readI8HalfAlpha2x2Pixels(info: TextureInfo, data: ArrayBufferSlice, out
 }
 
 function readPSMT8Pixels(info: TextureInfo, data: ArrayBufferSlice, out: Uint8Array) {
-    const clut8 = assertExists(info.clut).createTypedArray(Uint8Array);
+    const clut8 = assertExists(info.clut);
     const data8 = data.createTypedArray(Uint8Array);
     const numPixels = info.width * info.height;
     for (let i = 0; i < numPixels; ++i) {
@@ -242,7 +242,7 @@ function readPSMT8Pixels(info: TextureInfo, data: ArrayBufferSlice, out: Uint8Ar
 }
 
 function readPSMT4Pixels(info: TextureInfo, data: ArrayBufferSlice, out: Uint8Array) {
-    const clut8 = assertExists(info.clut).createTypedArray(Uint8Array);
+    const clut8 = assertExists(info.clut);
     const data8 = data.createTypedArray(Uint8Array);
     const numPixels = info.width * info.height;
     for (let i = 0; i < (numPixels + 1) >>> 1; ++i) {
@@ -292,7 +292,9 @@ function parseBrowserTextureInfo(data: ArrayBufferSlice): TextureInfo {
             throw "Unknown browser texture header type";
     }
 
-    const clut = paletteSize ? data.slice(20, 20 + paletteSize) : undefined;
+    const clut = paletteSize
+        ? data.slice(20, 20 + paletteSize).createTypedArray(Uint8Array)
+        : undefined;
 
     return {
         width,

@@ -23,7 +23,7 @@ function findInBuffer(needle: Uint8Array, haystack: Uint8Array): number {
 }
 
 function decompress(data: ArrayBufferSlice): ArrayBufferSlice {
-    const length = data.createTypedArray(Uint32Array, 0, 4)[0];
+    const length = data.createTypedArray(Uint32Array, 0, 1)[0];
     const src = data.createTypedArray(Uint8Array);
     const dst = new Uint8Array(length);
     let si = 4;
@@ -85,8 +85,8 @@ class ROMDir {
             nameEnd = 10;
         }
         const name = new TextDecoder("utf-8").decode(buffer.createTypedArray(Uint8Array, 0, nameEnd));
-        const extInfoSize = buffer.createTypedArray(Uint16Array, 10, 2)[0];
-        const fileSize = buffer.createTypedArray(Uint32Array, 12, 4)[0];
+        const extInfoSize = buffer.createTypedArray(Uint16Array, 10, 1)[0];
+        const fileSize = buffer.createTypedArray(Uint32Array, 12, 1)[0];
         return new ROMDir(name, extInfoSize, fileSize, fileOffset);
     }
 
@@ -154,5 +154,9 @@ export class BIOSROM {
             const id: ResourceID = i;
             this.textures.set(id, loadTexture(id, decompress(texImage.get(ResourceID[id])), device));
         }
+    }
+
+    public destroy(device: GfxDevice) {
+        this.textures.forEach((texture) => device.destroyTexture(texture.gfxTexture));
     }
 }
