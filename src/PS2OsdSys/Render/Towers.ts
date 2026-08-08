@@ -29,6 +29,7 @@ class TowersProgram extends BaseProgram {
     public static a_Position = 0;
     public static a_Normal = 1;
     public static a_TexCoord = 2;
+    public static a_ColorMul = 3;
 
     public static ub_TowerParams = 1;
 
@@ -38,6 +39,7 @@ ${TowersProgram.Common}
 layout(location = ${TowersProgram.a_Position}) in vec3 a_Position;
 layout(location = ${TowersProgram.a_Normal}) in vec3 a_Normal;
 layout(location = ${TowersProgram.a_TexCoord}) in vec2 a_TexCoord;
+layout(location = ${TowersProgram.a_ColorMul}) in float a_ColorMul;
 
 out vec3 v_Color;
 out vec2 v_TexCoord;
@@ -46,13 +48,17 @@ void main() {
     vec3 t_PositionWorld = (UnpackMatrix(u_TowerWorldFromLocal[gl_InstanceID]) * vec4(a_Position.xyz, 1.0f)).xyz;
     gl_Position = UnpackMatrix(u_ClipFromWorld) * vec4(t_PositionWorld, 1.0f);
 
-    vec3 vertexColor = vec3(1.0f);
+    vec4 TowerColorMulTexScroll = u_TowerColorMulTexScroll[gl_InstanceID / 2];
+    float TowerColorMul = TowerColorMulTexScroll[(gl_InstanceID % 2) * 2];
+    float TowerTexScroll = TowerColorMulTexScroll[(gl_InstanceID % 2) * 2 + 1];
+
+    vec3 vertexColor = vec3(a_ColorMul * TowerColorMul);
     vec3 lightNormalVector = UnpackMatrix(u_LightVectorMatrix[gl_InstanceID]) * vec4(a_Normal.xyz, 1.0f);
     vec3 lightDot = max(vec3(0.0f), lightNormalVector);
     vec3 lightColor = UnpackMatrix(u_LightColorMatrix) * vec4(lightDot.xyz, 1.0f);
     v_Color = vertexColor * lightColor;
 
-    v_TexCoord = a_TexCoord.xy;
+    v_TexCoord = a_TexCoord.xy + vec2(TowerTexScroll);
 }
 `;
 
@@ -74,6 +80,7 @@ layout(std140) uniform ub_TowerParams {
     Mat3x4 u_TowerWorldFromLocal[${NUM_TOWERS}];
     Mat3x4 u_LightColorMatrix;
     Mat3x4 u_LightVectorMatrix[${NUM_TOWERS}];
+    vec4 u_TowerColorMulTexScroll[${(NUM_TOWERS + 1) >>> 1}];
 };
 
 layout(location = 0) uniform sampler2D u_Texture;
@@ -83,7 +90,7 @@ layout(location = 0) uniform sampler2D u_Texture;
 
 const NUM_FACES = 5;
 const VERTS_PER_FACE = 4;
-const NUM_VERTEX_FLOATS = 8;
+const NUM_VERTEX_FLOATS = 9;
 
 const LIGHT_COLOR_MATRIX: mat4 = mat4.fromValues(
     1.0, 1.0, 1.0, 0.0,
@@ -112,42 +119,42 @@ export default class TowersGeometry {
         const vertexData = new Float32Array(NUM_FACES * VERTS_PER_FACE * NUM_VERTEX_FLOATS);
         vertexData.set([
             //   Face 0 - Back (skipped because it's degenerate geometry in the original)
-            //   X   Y   Z    NX   NY   NZ     U  V
+            //   X   Y   Z    NX   NY   NZ     U  V           CM
 
             //   Face 1 - Bottom
-            //   X   Y   Z    NX   NY   NZ     U  V
-             2, -2, -30,      0,  1, 0,        0.01, 0.01,
-             2, -2,  30,      0,  1, 0,        0.24, 0.01,
-            -2, -2, -30,      0,  1, 0,        0.01, 0.24,
-            -2, -2,  30,      0,  1, 0,        0.24, 0.24,
+            //   X   Y   Z    NX   NY   NZ     U  V           CM
+             2, -2, -30,      0,  1, 0,        0.01, 0.01,    0.8,
+             2, -2,  30,      0,  1, 0,        0.24, 0.01,    0.0,
+            -2, -2, -30,      0,  1, 0,        0.01, 0.24,    0.8,
+            -2, -2,  30,      0,  1, 0,        0.24, 0.24,    0.0,
 
             //   Face 2 - Top
-            //   X   Y   Z    NX   NY   NZ     U  V
-             2,  2,  30,      0, -1, 0,        0.01, 0.01,
-             2,  2, -30,      0, -1, 0,        0.24, 0.01,
-            -2,  2,  30,      0, -1, 0,        0.01, 0.24,
-            -2,  2, -30,      0, -1, 0,        0.24, 0.24,
+            //   X   Y   Z    NX   NY   NZ     U  V           CM
+             2,  2,  30,      0, -1, 0,        0.01, 0.01,    0.0,
+             2,  2, -30,      0, -1, 0,        0.24, 0.01,    0.8,
+            -2,  2,  30,      0, -1, 0,        0.01, 0.24,    0.0,
+            -2,  2, -30,      0, -1, 0,        0.24, 0.24,    0.8,
 
             //   Face 3 - Right
-            //   X   Y   Z    NX   NY   NZ     U  V
-             2, -2,  30,     -1,  0, 0,        0.01, 0.01,
-             2,  2,  30,     -1,  0, 0,        0.24, 0.01,
-             2, -2, -30,     -1,  0, 0,        0.01, 0.24,
-             2,  2, -30,     -1,  0, 0,        0.24, 0.24,
+            //   X   Y   Z    NX   NY   NZ     U  V           CM
+             2, -2,  30,     -1,  0, 0,        0.01, 0.01,    0.0,
+             2,  2,  30,     -1,  0, 0,        0.24, 0.01,    0.0,
+             2, -2, -30,     -1,  0, 0,        0.01, 0.24,    0.8,
+             2,  2, -30,     -1,  0, 0,        0.24, 0.24,    0.8,
 
             //   Face 4 - Left
-            //   X   Y   Z    NX   NY   NZ     U  V
-            -2, -2, -30,      1,  0, 0,        0.01, 0.01,
-            -2,  2, -30,      1,  0, 0,        0.24, 0.01,
-            -2, -2,  30,      1,  0, 0,        0.01, 0.24,
-            -2,  2,  30,      1,  0, 0,        0.24, 0.24,
+            //   X   Y   Z    NX   NY   NZ     U  V           CM
+            -2, -2, -30,      1,  0, 0,        0.01, 0.01,    0.8,
+            -2,  2, -30,      1,  0, 0,        0.24, 0.01,    0.8,
+            -2, -2,  30,      1,  0, 0,        0.01, 0.24,    0.0,
+            -2,  2,  30,      1,  0, 0,        0.24, 0.24,    0.0,
 
             //   Face 5 - Front
-            //   X   Y   Z    NX   NY   NZ     U  V
-             2, -2, -30,      0,  0, 1,        0.01, 0.01,
-            -2, -2, -30,      0,  0, 1,        0.24, 0.01,
-             2,  2, -30,      0,  0, 1,        0.01, 0.24,
-            -2,  2, -30,      0,  0, 1,        0.24, 0.24,
+            //   X   Y   Z    NX   NY   NZ     U  V           CM
+             2, -2, -30,      0,  0, 1,        0.01, 0.01,    1.0,
+            -2, -2, -30,      0,  0, 1,        0.24, 0.01,    1.0,
+             2,  2, -30,      0,  0, 1,        0.01, 0.24,    1.0,
+            -2,  2, -30,      0,  0, 1,        0.24, 0.24,    1.0,
         ]);
 
         this.indexCount = NUM_FACES * 6;
@@ -189,6 +196,12 @@ export default class TowersGeometry {
                     bufferByteOffset: 6 * 4,
                     bufferIndex: 0,
                 },
+                {
+                    location: TowersProgram.a_ColorMul,
+                    format: GfxFormat.F32_R,
+                    bufferByteOffset: 8 * 4,
+                    bufferIndex: 0,
+                },
             ],
 
             vertexBufferDescriptors: [
@@ -207,9 +220,11 @@ export default class TowersGeometry {
         device.destroyBuffer(this.indexBuffer);
     }
 
-    public draw(renderInterface: RenderInterface, objectMats: mat4[], lightVectorMats: mat4[]){
+    public draw(renderInterface: RenderInterface, objectMats: mat4[], lightVectorMats: mat4[], colorMultipliers: number[], texScrolls: number[]){
         assert(objectMats.length === NUM_TOWERS);
         assert(lightVectorMats.length === NUM_TOWERS);
+        assert(colorMultipliers.length === NUM_TOWERS);
+        assert(texScrolls.length === NUM_TOWERS);
 
         const renderInst = renderInterface.renderHelper.renderInstManager.newRenderInst();
 
@@ -228,7 +243,9 @@ export default class TowersGeometry {
         renderInst.setDrawCount(this.indexCount);
         renderInst.setInstanceCount(NUM_TOWERS);
 
-        const towerParams = renderInst.allocateUniformBufferF32(TowersProgram.ub_TowerParams, 12 * (NUM_TOWERS * 2 + 1));
+        const towerParams = renderInst.allocateUniformBufferF32(
+            TowersProgram.ub_TowerParams,
+            12 * (NUM_TOWERS * 2 + 1) + 4 * ((NUM_TOWERS + 1) >>> 1));
 
         let offs = 0;
         for (let i = 0; i < NUM_TOWERS; ++i) {
@@ -239,6 +256,11 @@ export default class TowersGeometry {
 
         for (let i = 0; i < NUM_TOWERS; ++i) {
             offs += fillMatrix4x3(towerParams, offs, lightVectorMats[i]);
+        }
+
+        for (let i = 0; i < NUM_TOWERS; ++i) {
+            towerParams[offs++] = colorMultipliers[i];
+            towerParams[offs++] = texScrolls[i];
         }
 
         renderInst.setMegaStateFlags({ cullMode: GfxCullMode.None });

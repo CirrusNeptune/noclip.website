@@ -1,5 +1,9 @@
 import {mat4, vec3} from "gl-matrix";
-import { makeBackbufferDescSimple, standardFullClearRenderPassDescriptor } from "../gfx/helpers/RenderGraphHelpers";
+import {
+    makeBackbufferDescSimple,
+    opaqueBlackFullClearRenderPassDescriptor,
+    standardFullClearRenderPassDescriptor
+} from "../gfx/helpers/RenderGraphHelpers";
 import { fillMatrix4x4 } from "../gfx/helpers/UniformBufferHelpers";
 import { GfxDevice, GfxMipFilterMode, GfxSampler, GfxTexFilterMode, GfxWrapMode } from "../gfx/platform/GfxPlatform";
 import { GfxrAttachmentSlot } from "../gfx/render/GfxRenderGraph";
@@ -127,9 +131,12 @@ export class BIOSCameraController extends FPSCameraController {
         if (!this.didInit) {
             this.scene.updateCameraMatrix(this.camera.worldMatrix);
             this.setKeyMoveSpeed(2);
+            this.camera.setPerspective(0.4604391746, this.camera.aspect, 1, 65536);
+            window.main.ui.viewerSettings.setupFromCamera(this, this.camera);
             this.didInit = true;
         }
-        super.update(inputManager, dt, sceneTimeScale);
+        this.scene.updateCameraMatrix(this.camera.worldMatrix);
+        //super.update(inputManager, dt, sceneTimeScale);
         this.camera.worldMatrixUpdated();
         //console.log(`${this.camera.worldMatrix[12]}, ${this.camera.worldMatrix[13]}, ${this.camera.worldMatrix[14]}`);
 
@@ -256,6 +263,7 @@ class BIOSScene implements SceneGfx, RenderInterface {
     private towerGridZScales: number[] = nArray(NUM_TOWERS, () => { return 0.0; });
     private towerGridZDisplacedColorMultiplier: number[] = nArray(NUM_TOWERS, () => { return 0.0; });
     private towerEnabled: boolean[] = nArray(NUM_TOWERS, () => { return false; });
+    private towerColorMultipliersBase: number[] = nArray(20 * 20, () => { return 0.0; });
 
     static readonly TOWER_GRID_BASE_TRANSLATIONS: number[] = [
         -137428 / 10000, 117512 / 10000, -25366 / 10000,
@@ -604,13 +612,39 @@ class BIOSScene implements SceneGfx, RenderInterface {
                 }
             }
         }
+
+        this.openingInitTowerColorMultipliers();
+    }
+
+    private openingInitTowerColorMultipliers() {
+        for (let x = 0; x < 20; ++x) {
+            for (let y = 0; y < 20; ++y) {
+                let fVar8 = -((x * 2 - 20) * 5.1 / 2 + 2.55);
+                let fVar9 = -5.1 - ((y * 2 - 20) * 5.1 / 2 + 2.55);
+                fVar8 = Math.sqrt(fVar8 * fVar8 + fVar9 * fVar9);
+                fVar8 = clamp(((72.12489 - (fVar8 + fVar8)) * 255.0) / 72.12489, 32, 255);
+                fVar9 = 5.1 - ((x * 2 - 20) * 5.1 / 2 + 2.55);
+                let fVar10 = 10.2 - ((y * 2 - 20) * 5.1 / 2 + 2.55);
+                fVar9 = (((72.12489 - Math.sqrt(fVar10 * fVar10 + fVar9 * fVar9) * 4.0) * 255.0) / 72.12489) / 2;
+                if (fVar9 < 32) {
+                    fVar8 = fVar8 + 32.0;
+                } else if (fVar9 > 255) {
+                    fVar8 = fVar8 + 255.0;
+                } else {
+                    fVar8 = fVar8 + fVar9;
+                }
+                fVar8 = clamp(fVar8 * 0.85 - (((((y + x) * y) / (x + 1)) % 11 - 5) * 10), 32, 220);
+                this.towerColorMultipliersBase[y * 20 + x] = fVar8;
+            }
+        }
     }
 
     private towerCameraManhattans: number[] = nArray(NUM_TOWERS, () => { return 0; });
     private towerObjectMats: mat4[] = nArray(NUM_TOWERS, mat4.create);
     private towerLightVectorMat: mat4 = mat4.create();
     private towerObjectLightVectorMats: mat4[] = nArray(NUM_TOWERS, mat4.create);
-    private towerScreenMat: mat4 = mat4.create();
+    private towerColorMultipliers: number[] = nArray(NUM_TOWERS, () => { return 0; });
+    private towerTexScrolls: number[] = nArray(NUM_TOWERS, () => { return 0; });
     private eyeDirection: vec3 = vec3.create();
     private eyeUpDirection: vec3 = vec3.create();
 
@@ -656,10 +690,19 @@ class BIOSScene implements SceneGfx, RenderInterface {
                 mat4.mul(this.towerObjectLightVectorMats[towerIdx], this.towerLightVectorMat, this.towerObjectMats[towerIdx]);
                 this.towerObjectMats[towerIdx][10] = this.towerGridZScales[towerIdx];
                 setMatrixTranslation(this.towerObjectMats[towerIdx], this.towerGridTranslations[towerIdx]);
+
+                this.towerColorMultipliers[towerIdx] = this.towerColorMultipliersBase[xPlus3 * 20 + yPlus6] / 255.0;
+
+                const iVar1b = (xPlus3 + yPlus6) * (x + 8);
+                this.towerTexScrolls[towerIdx] = (iVar1b / yPlus7 + ((xPlus3 + yPlus6) * (x + 7)) / (y + 9)) / 256;
             }
         }
 
-        this.towersGeometry.draw(this, this.towerObjectMats, this.towerObjectLightVectorMats);
+        this.towersGeometry.draw(this,
+            this.towerObjectMats,
+            this.towerObjectLightVectorMats,
+            this.towerColorMultipliers,
+            this.towerTexScrolls);
     }
 
     private openingInit_0021e578() {
@@ -868,7 +911,7 @@ class BIOSScene implements SceneGfx, RenderInterface {
         }
 
         const alpha = Math.min(0x70, this.drawStableState.sceTextAlpha);
-        console.log(`Drawing SCE at ${alpha} alpha`);
+        //console.log(`Drawing SCE at ${alpha} alpha`);
     }
 
     private tickWarningText() {
@@ -891,7 +934,7 @@ class BIOSScene implements SceneGfx, RenderInterface {
         }
 
         const alpha = Math.min(0x70, this.drawStableState.warningTextAlpha);
-        console.log(`Drawing warning at ${alpha} alpha`);
+        //console.log(`Drawing warning at ${alpha} alpha`);
     }
 
     private tickTextFade() {
@@ -984,6 +1027,8 @@ class BIOSScene implements SceneGfx, RenderInterface {
     }
 
     public updateCameraMatrix(cameraMatrix: mat4) {
+        this.eyeUpDirection[0] = Math.sin(this.drawStableState.cameraRoll);
+        this.eyeUpDirection[1] = Math.cos(this.drawStableState.cameraRoll);
         vec3.add(scratchVec, this.drawStableState.cameraPosition, this.eyeDirection);
         mat4.targetTo(cameraMatrix, this.drawStableState.cameraPosition, scratchVec, this.eyeUpDirection);
     }
@@ -1041,11 +1086,13 @@ class BIOSScene implements SceneGfx, RenderInterface {
         // To do post-processing, we'll need to render our objects into an intermediate texture.
         // This makeBackbufferDescSimple function tells us to create these textures to be as large as the window,
         // with default settings, and to use the default clear colors.
-        const mainColorDesc = makeBackbufferDescSimple(GfxrAttachmentSlot.Color0, viewerInput, standardFullClearRenderPassDescriptor);
+        const mainColorDesc = makeBackbufferDescSimple(GfxrAttachmentSlot.Color0, viewerInput, opaqueBlackFullClearRenderPassDescriptor);
         const mainDepthDesc = makeBackbufferDescSimple(GfxrAttachmentSlot.DepthStencil, viewerInput, standardFullClearRenderPassDescriptor);
 
         const mainColorTargetID = builder.createRenderTargetID(mainColorDesc, 'Main Color');
         const mainDepthTargetID = builder.createRenderTargetID(mainDepthDesc, 'Main Depth');
+
+        //const towerFeedbackColorTargetID = builder.createRenderTargetID(mainColorDesc, 'Tower Feedback Color');
 
         // Push our default pass. The function given to pushPass() is called immediately, this is just a convenient
         // way to structure our passes and code.
