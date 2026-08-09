@@ -1,21 +1,21 @@
-import {DeviceProgram} from "../../Program";
-import {GfxShaderLibrary} from "../../gfx/helpers/GfxShaderLibrary";
 import {GfxBuffer, GfxInputLayout, GfxProgram, GfxTexture} from "../../gfx/platform/GfxPlatformImpl";
 import {GfxRenderCache} from "../../gfx/render/GfxRenderCache";
 import {clamp} from "../../MathHelpers";
 import {createBufferFromData} from "../../gfx/helpers/BufferHelpers";
 import {
+    GfxBlendFactor,
+    GfxBlendMode,
     GfxBufferFrequencyHint,
-    GfxBufferUsage, GfxCullMode,
+    GfxBufferUsage,
+    GfxChannelWriteMask,
+    GfxCullMode,
     GfxDevice,
     GfxVertexBufferFrequency
 } from "../../gfx/platform/GfxPlatform";
 import {GfxFormat} from "../../gfx/platform/GfxPlatformFormat";
 import RenderInterface from "./RenderInterface";
-import {mat4} from "gl-matrix";
 import {BaseProgram} from "./Base";
-import {assertExists} from "../../util";
-import {fillMatrix4x3} from "../../gfx/helpers/UniformBufferHelpers";
+import {assert, assertExists} from "../../util";
 import {ResourceID} from "../ResourceIDs";
 import {BIOSROM} from "../BIOSROM";
 
@@ -35,12 +35,16 @@ layout(location = ${OpeningFogProgram.a_Color}) in vec4 a_Color;
 
 out vec2 v_TexCoord;
 out vec4 v_Color;
+flat out int v_TexIndex;
 
 void main() {
-    vec3 t_PositionWorld = (UnpackMatrix(u_WorldFromLocal) * vec4(a_Position.xyz, 1.0f)).xyz;
-    gl_Position = UnpackMatrix(u_ClipFromWorld) * vec4(t_PositionWorld, 1.0f);
+    vec3 Position = a_Position.xyz;
+    Position.z -= float(gl_InstanceID * 5);
+    gl_Position = UnpackMatrix(u_ClipFromWorld) * vec4(Position.xyz, 1.0f);
     v_TexCoord = a_TexCoord.xy;
+    v_TexCoord.y -= u_TexScroll[gl_InstanceID / 4][gl_InstanceID % 4];
     v_Color = a_Color;
+    v_TexIndex = gl_InstanceID % 3;
 }
 `;
 
@@ -49,10 +53,24 @@ ${OpeningFogProgram.Common}
 
 in vec2 v_TexCoord;
 in vec4 v_Color;
+flat in int v_TexIndex;
 
 void main() {
-    //gl_FragColor = texture(SAMPLER_2D(u_Texture), v_TexCoord.xy) * v_Color;
-    gl_FragColor = vec4(0,0,0,1);
+    vec4 TexSample = vec4(0);
+    switch (v_TexIndex) {
+    case 0:
+        TexSample = texture(SAMPLER_2D(u_Texture0), v_TexCoord.xy);
+        break;
+    case 1:
+        TexSample = texture(SAMPLER_2D(u_Texture1), v_TexCoord.xy);
+        break;
+    case 2:
+        TexSample = texture(SAMPLER_2D(u_Texture2), v_TexCoord.xy);
+        break;
+    }
+    vec4 Color = TexSample * v_Color;
+    Color = Color * (20.f / 128.f);
+    gl_FragColor = vec4(Color.rgb, 1.0);
 }
 `;
 
@@ -60,10 +78,12 @@ void main() {
 ${BaseProgram.BaseCommon}
 
 layout(std140) uniform ub_OpeningFogParams {
-    Mat3x4 u_WorldFromLocal;
+    vec4 u_TexScroll[2];
 };
 
-layout(location = 0) uniform sampler2D u_Texture;
+layout(binding = 0) uniform sampler2D u_Texture0;
+layout(binding = 1) uniform sampler2D u_Texture1;
+layout(binding = 2) uniform sampler2D u_Texture2;
 `;
 
 }
@@ -72,10 +92,12 @@ const PASS_TEXTURE_IDS = [
     ResourceID.TEXOFOG4,
     ResourceID.TEXOFOG2,
     ResourceID.TEXOFOG1,
-    ResourceID.TEXOFOG4,
-    ResourceID.TEXOFOG2,
-    ResourceID.TEXOFOG1,
 ];
+
+export const NUM_FOG_INSTANCES = 6;
+const GRID_VERT_DIM = 17;
+const GRID_QUAD_DIM = GRID_VERT_DIM - 1;
+const NUM_VERT_FLOATS = 9;
 
 export default class OpeningFogGeometry {
     private readonly vertexBuffer: GfxBuffer;
@@ -93,11 +115,11 @@ export default class OpeningFogGeometry {
         this.gfxTextures = PASS_TEXTURE_IDS.map((id) => assertExists(biosROM.textures.get(id)).gfxTexture);
 
         // Vertex format [XYZ], [UV], [RGBA]
-        const vertexData = new Float32Array(17 * 17 * 9);
+        const vertexData = new Float32Array(GRID_VERT_DIM * GRID_VERT_DIM * NUM_VERT_FLOATS);
 
         // X major in the original
-        for (let x = 0; x < 17; ++x) {
-            for (let y = 0; y < 17; ++y) {
+        for (let x = 0; x < GRID_VERT_DIM; ++x) {
+            for (let y = 0; y < GRID_VERT_DIM; ++y) {
                 const fVar10 = -5.0999994 - ((x * 2 - 16) * 6 * 0.5 + 3);
                 let fVar7 = -((y * 2 - 16) * 6 * 0.5 + 3);
                 fVar7 = ((72.12489 - Math.sqrt(fVar10 ** 2 + fVar7 ** 2) * 4) * 96) / 72.12489;
@@ -105,55 +127,31 @@ export default class OpeningFogGeometry {
 
                 const vertOff = (x * 17 + y) * 9;
                 vertexData[vertOff] = x * 6 - 48;
-                vertexData[vertOff + 1] = x * 6 - 48;
+                vertexData[vertOff + 1] = y * 6 - 48;
                 vertexData[vertOff + 2] = 134;
                 vertexData[vertOff + 3] = x * 0.5;
                 vertexData[vertOff + 4] = y * 0.5; // Also a scroll for the shader
                 vertexData[vertOff + 5] = 0;
                 vertexData[vertOff + 6] = 0;
-                vertexData[vertOff + 7] = fVar7 / 255;
-                vertexData[vertOff + 8] = 128 / 255;
+                vertexData[vertOff + 7] = fVar7 / 128;
+                vertexData[vertOff + 8] = 128 / 128;
             }
         }
 
-        this.indexCount = 16 * 16 * 6;
+        this.indexCount = GRID_QUAD_DIM * GRID_QUAD_DIM * NUM_FOG_INSTANCES;
         const indexData = new Uint16Array(this.indexCount);
 
-        for (let x = 0; x < 16; ++x) {
-            for (let y = 0; y < 16; ++y) {
-                const indexOff = (x * 16 + y) * 6;
-                indexData[indexOff] = x * 17 + y;
-                indexData[indexOff + 1] = x * 17 + (y + 1);
-                indexData[indexOff + 2] = (x + 1) * 17 + y;
-                indexData[indexOff + 3] = (x + 1) * 17 + (y + 1);
-                indexData[indexOff + 4] = (x + 1) * 17 + y;
-                indexData[indexOff + 5] = x * 17 + (y + 1);
+        for (let x = 0; x < GRID_QUAD_DIM; ++x) {
+            for (let y = 0; y < GRID_QUAD_DIM; ++y) {
+                const indexOff = (x * GRID_QUAD_DIM + y) * 6;
+                indexData[indexOff] = x * GRID_VERT_DIM + y;
+                indexData[indexOff + 1] = x * GRID_VERT_DIM + (y + 1);
+                indexData[indexOff + 2] = (x + 1) * GRID_VERT_DIM + y;
+                indexData[indexOff + 3] = (x + 1) * GRID_VERT_DIM + (y + 1);
+                indexData[indexOff + 4] = (x + 1) * GRID_VERT_DIM + y;
+                indexData[indexOff + 5] = x * GRID_VERT_DIM + (y + 1);
             }
         }
-
-        let temp = [
-            [0, 0],
-            [0, -1],
-            [1, 0]
-        ];
-        for (let i = 0; i < 3; ++i) {
-            const vertOff = i * 9;
-            vertexData[vertOff] = temp[i][0];
-            vertexData[vertOff + 1] = temp[i][1];
-            vertexData[vertOff + 2] = 0;
-            vertexData[vertOff + 3] = 0;
-            vertexData[vertOff + 4] = 0;
-            vertexData[vertOff + 5] = 0;
-            vertexData[vertOff + 6] = 0;
-            vertexData[vertOff + 7] = 0;
-            vertexData[vertOff + 8] = 0;
-        }
-
-        indexData[0] = 0;
-        indexData[1] = 1;
-        indexData[2] = 2;
-
-        this.indexCount = 3;
 
         this.vertexBuffer = createBufferFromData(device, GfxBufferUsage.Vertex, GfxBufferFrequencyHint.Static, vertexData.buffer);
         device.setResourceName(this.vertexBuffer, "OpeningFog (VB)");
@@ -185,7 +183,7 @@ export default class OpeningFogGeometry {
 
             vertexBufferDescriptors: [
                 {
-                    byteStride: 9 * 4,
+                    byteStride: NUM_VERT_FLOATS * 4,
                     frequency: GfxVertexBufferFrequency.PerVertex,
                 },
             ],
@@ -199,45 +197,52 @@ export default class OpeningFogGeometry {
         device.destroyBuffer(this.indexBuffer);
     }
 
-    public draw(renderInterface: RenderInterface, lightVectorMat: mat4){
-        for (let p = 0; p < 6; ++p) {
-            const renderInst = renderInterface.renderHelper.renderInstManager.newRenderInst();
+    public draw(renderInterface: RenderInterface, fogTexScrolls: number[]){
+        assert(fogTexScrolls.length === 6);
 
-            renderInst.setGfxProgram(this.gfxProgram);
+        const renderInst = renderInterface.renderHelper.renderInstManager.newRenderInst();
 
-            renderInst.setSamplerBindings(0, [
-                {gfxTexture: this.gfxTextures[p], gfxSampler: renderInterface.linearSampler}
-            ]);
+        renderInst.setGfxProgram(this.gfxProgram);
 
-            renderInst.setVertexInput(
-                this.inputLayout,
-                [{buffer: this.vertexBuffer, byteOffset: 0}],
-                {buffer: this.indexBuffer, byteOffset: 0},
-            );
+        renderInst.setSamplerBindings(0, [
+            {gfxTexture: this.gfxTextures[0], gfxSampler: renderInterface.linearSampler},
+            {gfxTexture: this.gfxTextures[1], gfxSampler: renderInterface.linearSampler},
+            {gfxTexture: this.gfxTextures[2], gfxSampler: renderInterface.linearSampler}
+        ]);
 
-            renderInst.setDrawCount(this.indexCount);
+        renderInst.setVertexInput(
+            this.inputLayout,
+            [{buffer: this.vertexBuffer, byteOffset: 0}],
+            {buffer: this.indexBuffer, byteOffset: 0},
+        );
 
-            // Create a transform for our cube.
-            const fogMatrix = mat4.create();
-            // Move it back a bit.
-            mat4.translate(fogMatrix, fogMatrix, [0, 0, 0 - p * 5]);
-            // Rotate it over time.
-            //mat4.rotateX(fogMatrix, fogMatrix, time * 0.0007);
-            //mat4.rotateY(fogMatrix, fogMatrix, time * 0.0003);
-            // Scale up our cube by 50 to make it larger on the screen.
-            mat4.scale(fogMatrix, fogMatrix, [50, 50, 50]);
+        renderInst.setDrawCount(this.indexCount);
+        renderInst.setInstanceCount(6);
 
-            // Now upload our cube's parameter data to the GPU, which is our matrix.
-            // This is a Mat3x4, which is 3 groups of 4 floats.
-            const openingFogParams = renderInst.allocateUniformBufferF32(OpeningFogProgram.ub_OpeningFogParams, 12);
-            let offs = 0;
-            offs += fillMatrix4x3(openingFogParams, offs, fogMatrix);
-
-            // Turn on backface culling. This is one of the fixed-function settings available through the MegaStateFlags.
-            renderInst.setMegaStateFlags({cullMode: GfxCullMode.None});
-
-            // Now that we're done setting up our render object, we can add it to our list of objects...
-            renderInterface.renderInstList.submitRenderInst(renderInst);
+        const openingFogParams = renderInst.allocateUniformBufferF32(OpeningFogProgram.ub_OpeningFogParams, 8);
+        for (let i = 0; i < 6; ++i) {
+            openingFogParams[i] = fogTexScrolls[i];
         }
+
+        renderInst.setMegaStateFlags({
+            attachmentsState: [
+                {
+                    channelWriteMask: GfxChannelWriteMask.AllChannels,
+                    rgbBlendState: {
+                        blendMode: GfxBlendMode.Add,
+                        blendSrcFactor: GfxBlendFactor.One,
+                        blendDstFactor: GfxBlendFactor.One
+                    },
+                    alphaBlendState: {
+                        blendMode: GfxBlendMode.Add,
+                        blendSrcFactor: GfxBlendFactor.One,
+                        blendDstFactor: GfxBlendFactor.One
+                    }
+                }
+            ],
+            cullMode: GfxCullMode.None
+        });
+
+        renderInterface.renderInstList.submitRenderInst(renderInst);
     }
 }

@@ -178,27 +178,19 @@ class BIOSScene implements SceneGfx, RenderInterface {
             this.textureHolder.viewerTextures.push(texture);
         });
 
-        // The GfxRenderHelper is a helper class that contains several helpers.
         this.renderHelper = new GfxRenderHelper(sceneContext.device, sceneContext);
 
-        // The GfxRenderCache is a helper we have on the render helper, which can detect when
-        // we're creating the same of an object, and return an existing one for us. We'll use
-        // the cache for input layouts, for shader programs, and for samplers.
-        // Note that objects created with the GfxRenderCache don't need to be destroyed, it
-        // wil get destroyed automatically later.
         const cache = this.renderHelper.renderCache;
 
         this.towersGeometry = new TowersGeometry(cache, this.biosROM);
         this.openingFogGeometry = new OpeningFogGeometry(cache, this.biosROM);
 
-        // Samplers define how exactly textures are sampled; in this case, we want linear filtering,
-        // and we want UVs that are out of bounds to clamp rather than repeat.
         this.linearSampler = cache.createSampler({
             minFilter: GfxTexFilterMode.Bilinear,
             magFilter: GfxTexFilterMode.Bilinear,
             mipFilter: GfxMipFilterMode.Nearest,
-            wrapS: GfxWrapMode.Clamp,
-            wrapT: GfxWrapMode.Clamp,
+            wrapS: GfxWrapMode.Repeat,
+            wrapT: GfxWrapMode.Repeat,
         });
 
         const playerSimulationParams: PlayerSimulationParams = {
@@ -639,7 +631,6 @@ class BIOSScene implements SceneGfx, RenderInterface {
         }
     }
 
-    private towerCameraManhattans: number[] = nArray(NUM_TOWERS, () => { return 0; });
     private towerObjectMats: mat4[] = nArray(NUM_TOWERS, mat4.create);
     private towerLightVectorMat: mat4 = mat4.create();
     private towerObjectLightVectorMats: mat4[] = nArray(NUM_TOWERS, mat4.create);
@@ -652,20 +643,6 @@ class BIOSScene implements SceneGfx, RenderInterface {
     }
 
     private drawOpeningTowers() {
-        let maxCameraToTowerManhattan = 0;
-        for (let x = 0; x < TOWER_GRID_WIDTH; ++x) {
-            for (let y = 0; y < TOWER_GRID_HEIGHT; ++y) {
-                const towerIdx = x * TOWER_GRID_HEIGHT + y;
-                const towerVector = this.towerGridTranslations[towerIdx];
-                const towerCameraDelta = vec3.sub(scratchVec, towerVector, this.tickStableState.cameraPosition);
-                const towerCameraManhattan = Math.abs(towerCameraDelta[0]) + Math.abs(towerCameraDelta[1]);
-                this.towerCameraManhattans[towerIdx] = towerCameraManhattan;
-                if (towerCameraManhattan > maxCameraToTowerManhattan) {
-                    maxCameraToTowerManhattan = towerCameraManhattan + 1;
-                }
-            }
-        }
-
         const animYaw = Math.sin((this.drawStableState.frameCounter % 360 - 180) * MathConstants.DEG_TO_RAD) * 10 * MathConstants.DEG_TO_RAD;
 
         for (let x = 0; x < TOWER_GRID_WIDTH; ++x) {
@@ -703,6 +680,15 @@ class BIOSScene implements SceneGfx, RenderInterface {
             this.towerObjectLightVectorMats,
             this.towerColorMultipliers,
             this.towerTexScrolls);
+    }
+
+    private fogTexScrolls: number[] = nArray(6, () => { return 0; });
+
+    private drawOpeningFog() {
+        for (let i = 0; i < 6; ++i) {
+            this.fogTexScrolls[i] = (((14 - i) * 0.0001 * (i + 1) / 2) * this.drawStableState.frameCounter) % 1;
+        }
+        this.openingFogGeometry.draw(this, this.fogTexScrolls);
     }
 
     private openingInit_0021e578() {
@@ -881,6 +867,7 @@ class BIOSScene implements SceneGfx, RenderInterface {
     private drawOpeningScreen() {
         if (this.screenProcessingState === ScreenProcessingState.NeedsUpdate) {
             this.drawOpeningTowers();
+            this.drawOpeningFog();
         }
     }
 
@@ -1038,54 +1025,20 @@ class BIOSScene implements SceneGfx, RenderInterface {
     }
 
     public render(device: GfxDevice, viewerInput: ViewerRenderInput): void {
-        // noclip's framework will call your render function once per frame. The device will always be the same
-        // as the device passed in through the sceneContext in the constructor. The renderInput provided contains
-        // extra details about the frame, like the delta time, window size, and mouse location.
-
-        // Set up debug drawing (we didn't use any debug drawing in this example, but you can try looking through
-        // this.renderHelper.debugDraw.* for all the different kinds of objects you can draw. These can be incredibly
-        // helpful when debugging issues!)
         this.renderHelper.debugDraw.beginFrame(viewerInput.camera.projectionMatrix, viewerInput.camera.viewMatrix, viewerInput.backbufferWidth, viewerInput.backbufferHeight);
 
-        // Example of debug draws:
-        // this.renderHelper.debugDraw.screenPrintText('Hello', Red);
-
-        // noclip's render framework has two important components to understand.
-        //
-        // The first is GfxRenderInst; this is how noclip's framework describes draw calls. A GfxRenderInst is an object
-        // with a shader, some uniform parameters, some textures, some vertices, and some fixed-function flags.
-        //
-        // You can submit GfxRenderInst's directly, but more likely, you'll want to make a lot of draw calls for different
-        // objects, so there's also a GfxRenderInstList where you can compile a lot of them together, and then draw them
-        // on a single render pass.
-        //
-        // The GfxRenderInst framework also has a template system which makes it easier to build a lot of draw calls that
-        // share parameters. Templates are very convenient for setting scene-specific parameters since you only need to
-        // set them on the template, once, and all draw calls will inherit them.
-
-        // First, set up our objects. In this case, we only have the cube to render. We need to set up a "template"
-        // render inst, which contains some default setup created by our render helper. This template will contain
-        // defaults for all the other render insts we'll use.
         const template = this.renderHelper.pushTemplateRenderInst();
 
-        // The first thing we must do is tell noclip the maximum number of uniform blocks and texture samplers we need.
         template.setBindingLayouts([
-            { numSamplers: 1, numUniformBuffers: 2 },
+            { numSamplers: 3, numUniformBuffers: 2 },
         ]);
 
-        // Fill in the ub_SceneParams uniform block. The viewerInput contains the viewer's camera.
         this.fillSceneParams(template, viewerInput);
 
         this.draw();
-        //this.renderHelper.debugDraw.screenPrintText(`${this.drawStableState.cameraPosition[2]}`, Green);
 
-        // We could manually configure render passes using device.createRenderPass(), but we have a helper to
-        // make writing render pass logic easier called the render graph; our render helper has one of them.
         const builder = this.renderHelper.renderGraph.newGraphBuilder();
 
-        // To do post-processing, we'll need to render our objects into an intermediate texture.
-        // This makeBackbufferDescSimple function tells us to create these textures to be as large as the window,
-        // with default settings, and to use the default clear colors.
         const mainColorDesc = makeBackbufferDescSimple(GfxrAttachmentSlot.Color0, viewerInput, opaqueBlackFullClearRenderPassDescriptor);
         const mainDepthDesc = makeBackbufferDescSimple(GfxrAttachmentSlot.DepthStencil, viewerInput, standardFullClearRenderPassDescriptor);
 
@@ -1094,43 +1047,27 @@ class BIOSScene implements SceneGfx, RenderInterface {
 
         //const towerFeedbackColorTargetID = builder.createRenderTargetID(mainColorDesc, 'Tower Feedback Color');
 
-        // Push our default pass. The function given to pushPass() is called immediately, this is just a convenient
-        // way to structure our passes and code.
         builder.pushPass((pass) => {
-            // Give the pass a debug name (helpful for error messages and debugging tools)
             pass.setDebugName("Opaque Objects");
 
-            // Attach our color and depth buffer.
             pass.attachRenderTargetID(GfxrAttachmentSlot.Color0, mainColorTargetID);
             pass.attachRenderTargetID(GfxrAttachmentSlot.DepthStencil, mainDepthTargetID);
 
-            // Now configure what should happen when we render this pass; in this case, we want to render our
-            // main object list, which contains our cube. This pass exec function won't be called now;
-            // it will be called later during the builder.execute() below.
             pass.exec((passRenderer, scope) => {
                 this.renderInstList.drawOnPassRenderer(this.renderHelper.renderCache, passRenderer);
             });
         });
 
-        // TODO: Blur pass
-
-        // Remove our template that we pushed using pushTemplate() at the beginning of the function,
-        // now that we've made all the render insts we need to.
         this.renderHelper.renderInstManager.popTemplate();
 
-        // Actually draw any of our debug draws.
         this.renderHelper.debugDraw.pushPasses(builder, mainColorTargetID, mainDepthTargetID);
 
-        // Push our standard antialiasing passes (this activates if the user has "FXAA" selected in Viewer Settings)
         this.renderHelper.antialiasingSupport.pushPasses(builder, viewerInput, mainColorTargetID);
 
-        // Now send our main color target on the screen.
         builder.resolveRenderTargetToExternalTexture(mainColorTargetID, viewerInput.onscreenTexture);
 
-        // Before we run, we need to tell the render helper to update some of the behind the scenes data...
         this.renderHelper.prepareToRender();
 
-        // Execute!
         builder.execute();
     }
 
@@ -1138,11 +1075,7 @@ class BIOSScene implements SceneGfx, RenderInterface {
         return new BIOSCameraController(this);
     }
 
-    // noclip has a few different hooks it calls when the scene is constructed to hook into various parts
-    // of its UI or rendering framework. When the scene is loaded, `createPanels()` is called, and the returned
-    // panels are placed inside the list of panels on the left.
     public createPanels(): UI.Panel[] {
-        // Create our settings panel.
         const renderSettingsPanel = new UI.Panel();
         renderSettingsPanel.customHeaderBackgroundColor = UI.COOL_BLUE_COLOR;
         renderSettingsPanel.setTitle(UI.RENDER_HACKS_ICON, 'Render Settings');
@@ -1151,8 +1084,6 @@ class BIOSScene implements SceneGfx, RenderInterface {
     }
 
     public destroy(device: GfxDevice): void {
-        // noclip's framework will call this destroy function when the user navigates away from your scene.
-        // Destroy any graphics resources or do any cleanup logic you need to here.
         this.renderHelper.destroy();
         this.towersGeometry.destroy(device);
         this.openingFogGeometry.destroy(device);
@@ -1163,35 +1094,20 @@ class BIOSScene implements SceneGfx, RenderInterface {
     }
 }
 
-// The SceneDesc needs an ID, a name, and a createScene function.
-// The SceneDesc's ID is used to identify the scene by URL; keep this stable so that users can bookmark your scene!
-// The SceneDesc's name is the name shown on the right side of the scene picker.
 class OsdSysSceneDesc implements SceneDesc {
     constructor(public id: string, public name: string) {
     }
 
     public async createScene(device: GfxDevice, sceneContext: SceneContext): Promise<SceneGfx> {
-        // Start the BIOS loading (async)
         const biosBuffer = await sceneContext.dataFetcher.fetchData(`${pathBase}/SCPH-70004_BIOS_V12_PAL_200.BIN`);
         return new BIOSScene(sceneContext, new BIOSROM(biosBuffer, sceneContext.device));
     }
 }
 
-// The SceneGroup is your entry point; it's how noclip's UI displays all of the available scenes in its menu,
-// and knows to pass control to your code.
-//
-// A SceneGroup usually corresponds to a single game, and the SceneDescs are the levels inside.
 export const sceneGroup: SceneGroup = {
-    // The SceneGroup's ID is used to identify the scene by URL. Much like the SceneDesc ID,
-    // keep this stable so that users can bookmark your scene!
     id: "PS2Bios",
-    // The SceneGroup's name is shown in the UI, on the left side of the scene picker.
     name: "PS2 Bios",
-
-    // The list of SceneDecs shows up on the right side of the scene picker.
     sceneDescs: [
-        // You can add strings into the sceneDescs array in order to add grouping to your scenes.
-        // "Examples",
         new OsdSysSceneDesc("BIOS", "BIOS"),
     ],
 };
