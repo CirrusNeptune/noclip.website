@@ -1,4 +1,4 @@
-import {mat4, vec3} from "gl-matrix";
+import {mat4, vec3, vec4} from "gl-matrix";
 import {
     makeBackbufferDescSimple,
     opaqueBlackFullClearRenderPassDescriptor,
@@ -26,6 +26,8 @@ import InputManager from "../InputManager";
 import {CameraController, CameraUpdateResult, FPSCameraController} from "../Camera";
 import {MCHistoryEntry, NUM_HISTORY_SLOTS, PlayerSimulationParams, simulatePlayer} from "./MCHistory";
 import {Green} from "../Color";
+import OpeningFlaresGeometry, {NUM_FLARE_OVERDRAWS, NUM_FLARES} from "./Render/OpeningFlares";
+import LinesGeometry from "./Render/Lines";
 
 // When we want to load files or assets at runtime, what directory are these assets in?
 // We're going to be loading data/Examples/mandrill.jpg from here later; pathBase is relative to the data/ directory.
@@ -96,7 +98,7 @@ function makeStableState(): StableState {
     }
 }
 
-function transferStableState(to: StableState, from: StableState) {
+function copyStableState(to: StableState, from: StableState) {
     to.frameCounter = from.frameCounter;
     vec3.copy(to.cameraPosition, from.cameraPosition);
     to.cameraRoll = from.cameraRoll;
@@ -127,6 +129,7 @@ export class BIOSCameraController extends FPSCameraController {
         const deltaTime = dt * sceneTimeScale / 1000;
         this.sceneTime += deltaTime;
 
+        this.scene.cameraAspect = this.camera.aspect;
         this.scene.tick(this.sceneTime);
         if (!this.didInit) {
             this.scene.updateCameraMatrix(this.camera.worldMatrix);
@@ -156,6 +159,8 @@ class BIOSScene implements SceneGfx, RenderInterface {
 
     private towersGeometry: TowersGeometry;
     private openingFogGeometry: OpeningFogGeometry;
+    private openingFlaresGeometry: OpeningFlaresGeometry;
+    private linesGeometry: LinesGeometry;
 
     public textureHolder = new FakeTextureHolder([]);
 
@@ -184,6 +189,8 @@ class BIOSScene implements SceneGfx, RenderInterface {
 
         this.towersGeometry = new TowersGeometry(cache, this.biosROM);
         this.openingFogGeometry = new OpeningFogGeometry(cache, this.biosROM);
+        this.openingFlaresGeometry = new OpeningFlaresGeometry(cache, this.biosROM);
+        this.linesGeometry = new LinesGeometry(cache);
 
         this.linearSampler = cache.createSampler({
             minFilter: GfxTexFilterMode.Bilinear,
@@ -691,6 +698,87 @@ class BIOSScene implements SceneGfx, RenderInterface {
         this.openingFogGeometry.draw(this, this.fogTexScrolls);
     }
 
+    static readonly FLARE_HISTORY_LEN = 128;
+    private flareTranslationBuf: vec3[] = nArray(NUM_FLARES * NUM_FLARE_OVERDRAWS, vec3.create);
+    private flareTranslations: vec3[] = nArray(NUM_FLARES, vec3.create);
+    private flareTranslationHistory: vec3[] = nArray(NUM_FLARES * BIOSScene.FLARE_HISTORY_LEN, vec3.create);
+    private flareTranslationHistoryCur: number = 0;
+    private flareHistoryLastFrame: number = 0;
+    private flareHistoryNeedsInit: boolean = true;
+    private flareLineSegs: vec3[] = nArray(NUM_FLARES * (BIOSScene.FLARE_HISTORY_LEN - 1) * 2, vec3.create);
+    private flareLineColorSegs: vec4[] = nArray(NUM_FLARES * (BIOSScene.FLARE_HISTORY_LEN - 1) * 2, vec4.create);
+    private flarePathPhase: number = 0;
+    public cameraAspect: number = 1;
+
+    static readonly FLARE_COLORS: vec4[] = [
+        [32 / 128, 128 / 128, 0, 0],
+        [128 / 128, 32 / 128, 64 / 128, 0],
+        [128 / 128, 0, 0, 0],
+        [64 / 128, 32 / 128, 128 / 128, 0],
+    ];
+
+    private drawOpeningFlares() {
+        for (let i = 0; i < NUM_FLARES; ++i) {
+            const x = Math.cos((this.drawStableState.frameCounter + this.flarePathPhase + i * 17) * 0.01 * (i + 10) * 0.1);
+            const y = Math.sin((this.drawStableState.frameCounter + this.flarePathPhase + i * 15) * 0.005 * (i + 10) * 0.1);
+            for (let o = 0; o < NUM_FLARE_OVERDRAWS; ++o) {
+                const transIdx = i * NUM_FLARE_OVERDRAWS + o;
+                if (o === NUM_FLARE_OVERDRAWS - 1) {
+                    vec3.set(this.flareTranslations[i], (10 - i) * x, (i + 3) * y, x * 12 + 88);
+                    vec3.copy(this.flareTranslationBuf[transIdx], this.flareTranslations[i]);
+                } else {
+                    const nextTransIdx = i * NUM_FLARE_OVERDRAWS + o + 1;
+                    vec3.copy(this.flareTranslationBuf[transIdx], this.flareTranslationBuf[nextTransIdx]);
+                }
+            }
+        }
+
+        this.openingFlaresGeometry.draw(this, this.flareTranslationBuf, BIOSScene.FLARE_COLORS);
+
+        if (this.flareHistoryLastFrame !== this.drawStableState.frameCounter >>> 0) {
+            this.flareHistoryLastFrame = this.drawStableState.frameCounter >>> 0;
+
+            // Update flare history buffer regulated by 60Hz frames.
+            for (let i = 0; i < NUM_FLARES; ++i) {
+                if (this.flareHistoryNeedsInit) {
+                    for (let h = 0; h < BIOSScene.FLARE_HISTORY_LEN; ++h) {
+                        const historyIdx = i * BIOSScene.FLARE_HISTORY_LEN + h;
+                        vec3.copy(this.flareTranslationHistory[historyIdx], this.flareTranslations[i]);
+                    }
+                } else {
+                    const historyIdx = i * BIOSScene.FLARE_HISTORY_LEN + this.flareTranslationHistoryCur;
+                    vec3.copy(this.flareTranslationHistory[historyIdx], this.flareTranslations[i]);
+                }
+
+                const flareColor = BIOSScene.FLARE_COLORS[i];
+                for (let h = 0; h < BIOSScene.FLARE_HISTORY_LEN - 1; ++h) {
+                    const sourceIdx = (this.flareTranslationHistoryCur + 1 + h) % BIOSScene.FLARE_HISTORY_LEN;
+                    const nextSourceIdx = (this.flareTranslationHistoryCur + 2 + h) % BIOSScene.FLARE_HISTORY_LEN;
+                    const historyIdx = i * BIOSScene.FLARE_HISTORY_LEN + sourceIdx;
+                    const nextHistoryIdx = i * BIOSScene.FLARE_HISTORY_LEN + nextSourceIdx;
+                    const outIdx = (i * (BIOSScene.FLARE_HISTORY_LEN - 1) + h) * 2;
+                    vec3.copy(this.flareLineSegs[outIdx], this.flareTranslationHistory[historyIdx]);
+                    vec3.copy(this.flareLineSegs[outIdx + 1], this.flareTranslationHistory[nextHistoryIdx]);
+                    vec4.copy(this.flareLineColorSegs[outIdx], flareColor);
+                    this.flareLineColorSegs[outIdx][3] = h / BIOSScene.FLARE_HISTORY_LEN / 2;
+                    vec4.copy(this.flareLineColorSegs[outIdx + 1], flareColor);
+                    this.flareLineColorSegs[outIdx + 1][3] = (h + 1) / BIOSScene.FLARE_HISTORY_LEN / 2;
+                }
+            }
+
+            this.flareTranslationHistoryCur = (this.flareTranslationHistoryCur + 1) % BIOSScene.FLARE_HISTORY_LEN;
+            this.flareHistoryNeedsInit = false;
+        } else {
+            // For intermediate frames, use the latest translation on the final segment.
+            for (let i = 0; i < NUM_FLARES; ++i) {
+                const outIdx = (i * (BIOSScene.FLARE_HISTORY_LEN - 1) + BIOSScene.FLARE_HISTORY_LEN - 2) * 2;
+                vec3.copy(this.flareLineSegs[outIdx + 1], this.flareTranslations[i]);
+            }
+        }
+
+        this.linesGeometry.draw(this, this.flareLineSegs, this.flareLineColorSegs, this.cameraAspect);
+    }
+
     private openingInit_0021e578() {
         this.fadeWarningTextOut = false;
     }
@@ -724,6 +812,7 @@ class BIOSScene implements SceneGfx, RenderInterface {
 
     private initLightsCubes() {
         this.initCubes();
+        this.flarePathPhase = ((Math.random() * 0xffffffff) >>> 0) % 0x929 + 0xd80;
     }
 
     static normalLightMatrix(out: mat4, l0: vec3, l1: vec3, l2: vec3): mat4 {
@@ -868,6 +957,7 @@ class BIOSScene implements SceneGfx, RenderInterface {
         if (this.screenProcessingState === ScreenProcessingState.NeedsUpdate) {
             this.drawOpeningTowers();
             this.drawOpeningFog();
+            this.drawOpeningFlares();
         }
     }
 
@@ -990,13 +1080,13 @@ class BIOSScene implements SceneGfx, RenderInterface {
     public tick(time: number) {
         if (this.lastStableTickTime === null) {
             this.stableTick();
-            transferStableState(this.prevStableState, this.tickStableState);
-            transferStableState(this.drawStableState, this.prevStableState);
+            copyStableState(this.prevStableState, this.tickStableState);
+            copyStableState(this.drawStableState, this.prevStableState);
             this.lastStableTickTime = time;
             return;
         }
         while (this.lastStableTickTime < time) {
-            transferStableState(this.prevStableState, this.tickStableState);
+            copyStableState(this.prevStableState, this.tickStableState);
             this.stableTick();
             this.lastStableTickTime += BIOSScene.STABLE_TICK_RATE;
         }
@@ -1030,7 +1120,7 @@ class BIOSScene implements SceneGfx, RenderInterface {
         const template = this.renderHelper.pushTemplateRenderInst();
 
         template.setBindingLayouts([
-            { numSamplers: 3, numUniformBuffers: 2 },
+            { numSamplers: 1, numUniformBuffers: 2 },
         ]);
 
         this.fillSceneParams(template, viewerInput);
@@ -1087,6 +1177,8 @@ class BIOSScene implements SceneGfx, RenderInterface {
         this.renderHelper.destroy();
         this.towersGeometry.destroy(device);
         this.openingFogGeometry.destroy(device);
+        this.openingFlaresGeometry.destroy(device);
+        this.linesGeometry.destroy(device);
 
         this.biosROM.destroy(device);
 

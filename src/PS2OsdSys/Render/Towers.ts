@@ -83,7 +83,7 @@ layout(std140) uniform ub_TowerParams {
     vec4 u_TowerColorMulTexScroll[${(NUM_TOWERS + 1) >>> 1}];
 };
 
-layout(location = 0) uniform sampler2D u_Texture;
+uniform sampler2D u_Texture;
 `;
 
 }

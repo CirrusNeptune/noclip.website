@@ -44,7 +44,7 @@ void main() {
     v_TexCoord = a_TexCoord.xy;
     v_TexCoord.y -= u_TexScroll[gl_InstanceID / 4][gl_InstanceID % 4];
     v_Color = a_Color;
-    v_TexIndex = gl_InstanceID % 3;
+    v_TexIndex = int(gl_InstanceID % 3);
 }
 `;
 
@@ -56,18 +56,7 @@ in vec4 v_Color;
 flat in int v_TexIndex;
 
 void main() {
-    vec4 TexSample = vec4(0);
-    switch (v_TexIndex) {
-    case 0:
-        TexSample = texture(SAMPLER_2D(u_Texture0), v_TexCoord.xy);
-        break;
-    case 1:
-        TexSample = texture(SAMPLER_2D(u_Texture1), v_TexCoord.xy);
-        break;
-    case 2:
-        TexSample = texture(SAMPLER_2D(u_Texture2), v_TexCoord.xy);
-        break;
-    }
+    vec4 TexSample = vec4(texture(SAMPLER_2D(u_Texture), v_TexCoord.xy)[v_TexIndex]);
     vec4 Color = TexSample * v_Color;
     Color = Color * (20.f / 128.f);
     gl_FragColor = vec4(Color.rgb, 1.0);
@@ -81,18 +70,10 @@ layout(std140) uniform ub_OpeningFogParams {
     vec4 u_TexScroll[2];
 };
 
-layout(binding = 0) uniform sampler2D u_Texture0;
-layout(binding = 1) uniform sampler2D u_Texture1;
-layout(binding = 2) uniform sampler2D u_Texture2;
+uniform sampler2D u_Texture;
 `;
 
 }
-
-const PASS_TEXTURE_IDS = [
-    ResourceID.TEXOFOG4,
-    ResourceID.TEXOFOG2,
-    ResourceID.TEXOFOG1,
-];
 
 export const NUM_FOG_INSTANCES = 6;
 const GRID_VERT_DIM = 17;
@@ -105,14 +86,14 @@ export default class OpeningFogGeometry {
     private readonly indexCount: number;
     private readonly inputLayout: GfxInputLayout;
     private readonly gfxProgram: GfxProgram;
-    private readonly gfxTextures: GfxTexture[];
+    private readonly fogTexture: GfxTexture;
 
     constructor(cache: GfxRenderCache, biosROM: BIOSROM) {
         const device = cache.device;
 
         this.gfxProgram = cache.createProgram(new OpeningFogProgram());
 
-        this.gfxTextures = PASS_TEXTURE_IDS.map((id) => assertExists(biosROM.textures.get(id)).gfxTexture);
+        this.fogTexture = assertExists(biosROM.textures.get(ResourceID.TEXOFOGC)).gfxTexture;
 
         // Vertex format [XYZ], [UV], [RGBA]
         const vertexData = new Float32Array(GRID_VERT_DIM * GRID_VERT_DIM * NUM_VERT_FLOATS);
@@ -205,9 +186,7 @@ export default class OpeningFogGeometry {
         renderInst.setGfxProgram(this.gfxProgram);
 
         renderInst.setSamplerBindings(0, [
-            {gfxTexture: this.gfxTextures[0], gfxSampler: renderInterface.linearSampler},
-            {gfxTexture: this.gfxTextures[1], gfxSampler: renderInterface.linearSampler},
-            {gfxTexture: this.gfxTextures[2], gfxSampler: renderInterface.linearSampler}
+            {gfxTexture: this.fogTexture, gfxSampler: renderInterface.linearSampler},
         ]);
 
         renderInst.setVertexInput(

@@ -1,13 +1,7 @@
 import {GSPixelStorageFormat} from "../Common/PS2/GS";
 import ArrayBufferSlice from "../ArrayBufferSlice";
 import * as Viewer from "../viewer";
-import {
-    GfxDevice,
-    GfxFormat,
-    GfxTextureDescriptor,
-    GfxTextureDimension,
-    makeTextureDescriptor2D
-} from "../gfx/platform/GfxPlatform";
+import {GfxDevice, GfxFormat, makeTextureDescriptor2D} from "../gfx/platform/GfxPlatform";
 import {assertExists} from "../util";
 import {ResourceID} from "./ResourceIDs";
 
@@ -306,6 +300,10 @@ function parseBrowserTextureInfo(data: ArrayBufferSlice): TextureInfo {
     }
 }
 
+let TEXOFOG4Pixels: Uint8Array | null = null;
+let TEXOFOG2Pixels: Uint8Array | null = null;
+let TEXOFOG1Pixels: Uint8Array | null = null;
+
 export function loadTexture(id: ResourceID, data: ArrayBufferSlice, device: GfxDevice): Texture {
     let info = assertExists(TEXTURE_INFOS.get(id));
     if (info.psm === OsdSysPixelStorageFormat.BrowserTexture) {
@@ -350,6 +348,13 @@ export function loadTexture(id: ResourceID, data: ArrayBufferSlice, device: GfxD
             throw "Unknown PSM";
     }
 
+    if (id === ResourceID.TEXOFOG4)
+        TEXOFOG4Pixels = pixels;
+    else if (id === ResourceID.TEXOFOG2)
+        TEXOFOG2Pixels = pixels;
+    else if (id === ResourceID.TEXOFOG1)
+        TEXOFOG1Pixels = pixels;
+
     const gfxTexture = device.createTexture(
         makeTextureDescriptor2D(GfxFormat.U8_RGBA_NORM, info.width, info.height, 1));
 
@@ -358,6 +363,40 @@ export function loadTexture(id: ResourceID, data: ArrayBufferSlice, device: GfxD
 
     const extraInfo = new Map<string, string>();
     extraInfo.set("Format", OsdSysPixelStorageFormat[info.psm]);
+    return {
+        gfxTexture,
+        extraInfo
+    };
+}
+
+// For optimal drawing of fog layers, pack TEXOFOG4,2,1 into one texture.
+// See Render/OpeningFog.ts for implementation.
+export function buildTEXOFOGC(device: GfxDevice): Texture {
+    const TEXOFOG4 = assertExists(TEXOFOG4Pixels);
+    const TEXOFOG2 = assertExists(TEXOFOG2Pixels);
+    const TEXOFOG1 = assertExists(TEXOFOG1Pixels);
+
+    const pixels = new Uint8Array(64 * 64 * 4);
+    for (let i = 0; i < 64 * 64; ++i) {
+        pixels[i * 4] = TEXOFOG4[i * 4];
+        pixels[i * 4 + 1] = TEXOFOG2[i * 4];
+        pixels[i * 4 + 2] = TEXOFOG1[i * 4];
+        pixels[i * 4 + 3] = 0xff;
+    }
+
+    // Done with these, let GC get em
+    TEXOFOG4Pixels = null;
+    TEXOFOG2Pixels = null;
+    TEXOFOG1Pixels = null;
+
+    const gfxTexture = device.createTexture(
+        makeTextureDescriptor2D(GfxFormat.U8_RGBA_NORM, 64, 64, 1));
+
+    device.uploadTextureData(gfxTexture, 0, [pixels]);
+    device.setResourceName(gfxTexture, ResourceID[ResourceID.TEXOFOGC]);
+
+    const extraInfo = new Map<string, string>();
+    extraInfo.set("Format", OsdSysPixelStorageFormat[OsdSysPixelStorageFormat.PSMCT32]);
     return {
         gfxTexture,
         extraInfo
