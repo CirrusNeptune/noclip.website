@@ -101,6 +101,7 @@ export default class OpeningFogGeometry {
         // X major in the original
         for (let x = 0; x < GRID_VERT_DIM; ++x) {
             for (let y = 0; y < GRID_VERT_DIM; ++y) {
+                // Generate blue "spotlight" as vertex colors
                 const fVar10 = -5.0999994 - ((x * 2 - 16) * 6 * 0.5 + 3);
                 let fVar7 = -((y * 2 - 16) * 6 * 0.5 + 3);
                 fVar7 = ((72.12489 - Math.sqrt(fVar10 ** 2 + fVar7 ** 2) * 4) * 96) / 72.12489;
@@ -222,6 +223,6 @@ export default class OpeningFogGeometry {
             cullMode: GfxCullMode.None
         });
 
-        renderInterface.renderInstList.submitRenderInst(renderInst);
+        renderInterface.mainInstList.submitRenderInst(renderInst);
     }
 }

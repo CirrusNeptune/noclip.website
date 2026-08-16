@@ -1,7 +1,7 @@
 import ArrayBufferSlice from "../ArrayBufferSlice";
 import {assertExists} from "../util";
 import { HD, parseHD, SQ, parseSQ } from "./OsdSnd/OsdSnd";
-import {buildTEXOFOGC, loadTexture, Texture} from "./Textures";
+import {buildTEXOBLPC, buildTEXOFOGC, loadTexture, Texture} from "./Textures";
 import {GfxDevice} from "../gfx/platform/GfxPlatform";
 import {ResourceID} from "./ResourceIDs";
 
@@ -157,6 +157,9 @@ export class BIOSROM {
 
         // Combine TEXOFOG4,2,1 into channel-packed texture.
         this.textures.set(ResourceID.TEXOFOGC, buildTEXOFOGC(device));
+
+        // Combine TEXOBLPR,TEXOBLP into channel-packed texture.
+        this.textures.set(ResourceID.TEXOBLPC, buildTEXOBLPC(device));
     }
 
     public destroy(device: GfxDevice) {

@@ -265,6 +265,6 @@ export default class TowersGeometry {
 
         renderInst.setMegaStateFlags({ cullMode: GfxCullMode.None });
 
-        renderInterface.renderInstList.submitRenderInst(renderInst);
+        renderInterface.mainInstList.submitRenderInst(renderInst);
     }
 }

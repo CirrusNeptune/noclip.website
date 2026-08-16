@@ -4,6 +4,9 @@ import {GfxSampler} from "../../gfx/platform/GfxPlatformImpl";
 
 export default interface RenderInterface {
     renderHelper: GfxRenderHelper;
-    renderInstList: GfxRenderInstList;
+    mainInstList: GfxRenderInstList;
+    backfaceCubeInstList: GfxRenderInstList;
+    frontfaceCubeInstList: GfxRenderInstList;
+    textInstList: GfxRenderInstList;
     linearSampler: GfxSampler;
 }

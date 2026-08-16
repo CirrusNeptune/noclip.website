@@ -83,4 +83,5 @@ export enum ResourceID {
     ICOBQUES,
     TZLIST,
     TEXOFOGC, // Fake texture resource of TEXOFOG4,2,1 channel-packed
+    TEXOBLPC, // Fake texture resource of TEXOBLPR,TEXOBLP channel-packed
 }

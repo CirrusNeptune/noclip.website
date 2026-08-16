@@ -261,7 +261,7 @@ export class FPSCameraController implements CameraController {
     }
 
     public setKeyMoveSpeed(speed: number): void {
-        this.keyMoveSpeed = Math.max(speed, 1);
+        this.keyMoveSpeed = Math.max(speed, 0.1);
     }
 
     public getKeyMoveSpeed(): number {

@@ -10,5 +10,6 @@ ${GfxShaderLibrary.MatrixLibrary}
 
 layout(std140) uniform ub_SceneParams {
     Mat4x4 u_ClipFromWorld;
+    Mat4x4 u_ViewFromWorld;
 };`;
 }

@@ -28,10 +28,14 @@ import {MCHistoryEntry, NUM_HISTORY_SLOTS, PlayerSimulationParams, simulatePlaye
 import {Green} from "../Color";
 import OpeningFlaresGeometry, {NUM_FLARE_OVERDRAWS, NUM_FLARES} from "./Render/OpeningFlares";
 import LinesGeometry from "./Render/Lines";
+import MultipassCubeGeometry from "./Render/MultipassCube";
 
-// When we want to load files or assets at runtime, what directory are these assets in?
-// We're going to be loading data/Examples/mandrill.jpg from here later; pathBase is relative to the data/ directory.
-const pathBase = `PS2OsdSys`;
+export const noclipSpaceFromOsdSysSpace = mat4.fromValues(
+    -1, 0,  0, 0,
+    0, 1, 0, 0,
+    0, 0,  1, 0,
+    0, 0,  0, 1,
+);
 
 const scratchVec: vec3 = vec3.create();
 const scratchVec2: vec3 = vec3.create();
@@ -133,13 +137,13 @@ export class BIOSCameraController extends FPSCameraController {
         this.scene.tick(this.sceneTime);
         if (!this.didInit) {
             this.scene.updateCameraMatrix(this.camera.worldMatrix);
-            this.setKeyMoveSpeed(2);
+            this.setKeyMoveSpeed(0.1);
             this.camera.setPerspective(0.4604391746, this.camera.aspect, 1, 65536);
             window.main.ui.viewerSettings.setupFromCamera(this, this.camera);
             this.didInit = true;
         }
-        this.scene.updateCameraMatrix(this.camera.worldMatrix);
-        //super.update(inputManager, dt, sceneTimeScale);
+        //this.scene.updateCameraMatrix(this.camera.worldMatrix);
+        super.update(inputManager, dt, sceneTimeScale);
         this.camera.worldMatrixUpdated();
         //console.log(`${this.camera.worldMatrix[12]}, ${this.camera.worldMatrix[13]}, ${this.camera.worldMatrix[14]}`);
 
@@ -151,16 +155,19 @@ export class BIOSCameraController extends FPSCameraController {
 class BIOSScene implements SceneGfx, RenderInterface {
     public renderHelper: GfxRenderHelper;
 
-    // The renderInstList contains all of the objects we'll draw every frame.
-    public renderInstList = new GfxRenderInstList();
+    public mainInstList = new GfxRenderInstList();
+    public backfaceCubeInstList = new GfxRenderInstList();
+    public frontfaceCubeInstList = new GfxRenderInstList();
+    public textInstList = new GfxRenderInstList();
 
-    // The sampler for our cube, and for post-processing.
     public linearSampler: GfxSampler;
+    public clampSampler: GfxSampler;
 
     private towersGeometry: TowersGeometry;
     private openingFogGeometry: OpeningFogGeometry;
     private openingFlaresGeometry: OpeningFlaresGeometry;
     private linesGeometry: LinesGeometry;
+    private multipassCubeGeometry: MultipassCubeGeometry;
 
     public textureHolder = new FakeTextureHolder([]);
 
@@ -191,6 +198,7 @@ class BIOSScene implements SceneGfx, RenderInterface {
         this.openingFogGeometry = new OpeningFogGeometry(cache, this.biosROM);
         this.openingFlaresGeometry = new OpeningFlaresGeometry(cache, this.biosROM);
         this.linesGeometry = new LinesGeometry(cache);
+        this.multipassCubeGeometry = new MultipassCubeGeometry(cache, this.biosROM);
 
         this.linearSampler = cache.createSampler({
             minFilter: GfxTexFilterMode.Bilinear,
@@ -198,6 +206,13 @@ class BIOSScene implements SceneGfx, RenderInterface {
             mipFilter: GfxMipFilterMode.Nearest,
             wrapS: GfxWrapMode.Repeat,
             wrapT: GfxWrapMode.Repeat,
+        });
+        this.clampSampler = cache.createSampler({
+            minFilter: GfxTexFilterMode.Bilinear,
+            magFilter: GfxTexFilterMode.Bilinear,
+            mipFilter: GfxMipFilterMode.Nearest,
+            wrapS: GfxWrapMode.Clamp,
+            wrapT: GfxWrapMode.Clamp,
         });
 
         const playerSimulationParams: PlayerSimulationParams = {
@@ -214,9 +229,14 @@ class BIOSScene implements SceneGfx, RenderInterface {
     }
 
     private fillSceneParams(template: GfxRenderInst, viewerInput: ViewerRenderInput): void {
-        const data = template.allocateUniformBufferF32(BaseProgram.ub_SceneParams, 16);
+        const data = template.allocateUniformBufferF32(BaseProgram.ub_SceneParams, 32);
         let offs = 0;
-        offs += fillMatrix4x4(data, offs, viewerInput.camera.clipFromWorldMatrix);
+
+        mat4.mul(scratchMat, viewerInput.camera.clipFromWorldMatrix, noclipSpaceFromOsdSysSpace);
+        offs += fillMatrix4x4(data, offs, scratchMat);
+
+        mat4.mul(scratchMat, viewerInput.camera.viewMatrix, noclipSpaceFromOsdSysSpace);
+        offs += fillMatrix4x4(data, offs, scratchMat);
     }
 
     static readonly STABLE_TICK_RATE = 1.0 / 60.0;
@@ -779,6 +799,10 @@ class BIOSScene implements SceneGfx, RenderInterface {
         this.linesGeometry.draw(this, this.flareLineSegs, this.flareLineColorSegs, this.cameraAspect);
     }
 
+    private drawCubes() {
+        this.multipassCubeGeometry.draw(this, this.drawStableState.frameCounter / 60);
+    }
+
     private openingInit_0021e578() {
         this.fadeWarningTextOut = false;
     }
@@ -958,6 +982,7 @@ class BIOSScene implements SceneGfx, RenderInterface {
             this.drawOpeningTowers();
             this.drawOpeningFog();
             this.drawOpeningFlares();
+            this.drawCubes();
         }
     }
 
@@ -1104,6 +1129,7 @@ class BIOSScene implements SceneGfx, RenderInterface {
     }
 
     public updateCameraMatrix(cameraMatrix: mat4) {
+        this.drawStableState.cameraRoll = 0;
         this.eyeUpDirection[0] = Math.sin(this.drawStableState.cameraRoll);
         this.eyeUpDirection[1] = Math.cos(this.drawStableState.cameraRoll);
         vec3.add(scratchVec, this.drawStableState.cameraPosition, this.eyeDirection);
@@ -1115,16 +1141,19 @@ class BIOSScene implements SceneGfx, RenderInterface {
     }
 
     public render(device: GfxDevice, viewerInput: ViewerRenderInput): void {
-        this.renderHelper.debugDraw.beginFrame(viewerInput.camera.projectionMatrix, viewerInput.camera.viewMatrix, viewerInput.backbufferWidth, viewerInput.backbufferHeight);
-
+        this.renderHelper.debugDraw.beginFrame(
+            viewerInput.camera.projectionMatrix,
+            viewerInput.camera.viewMatrix,
+            viewerInput.backbufferWidth,
+            viewerInput.backbufferHeight
+        );
         const template = this.renderHelper.pushTemplateRenderInst();
-
         template.setBindingLayouts([
             { numSamplers: 1, numUniformBuffers: 2 },
         ]);
-
         this.fillSceneParams(template, viewerInput);
 
+        // This will update our uniforms and populate the inst lists.
         this.draw();
 
         const builder = this.renderHelper.renderGraph.newGraphBuilder();
@@ -1135,29 +1164,66 @@ class BIOSScene implements SceneGfx, RenderInterface {
         const mainColorTargetID = builder.createRenderTargetID(mainColorDesc, 'Main Color');
         const mainDepthTargetID = builder.createRenderTargetID(mainDepthDesc, 'Main Depth');
 
-        //const towerFeedbackColorTargetID = builder.createRenderTargetID(mainColorDesc, 'Tower Feedback Color');
+        // Route text to the final on-screen pass for this frame.
+        const textInCubePass = this.frontfaceCubeInstList.renderInsts.length !== 0;
 
+        // Main on-screen pass (towers, fog, flares).
         builder.pushPass((pass) => {
-            pass.setDebugName("Opaque Objects");
-
+            pass.setDebugName("Main Pass");
             pass.attachRenderTargetID(GfxrAttachmentSlot.Color0, mainColorTargetID);
             pass.attachRenderTargetID(GfxrAttachmentSlot.DepthStencil, mainDepthTargetID);
-
             pass.exec((passRenderer, scope) => {
-                this.renderInstList.drawOnPassRenderer(this.renderHelper.renderCache, passRenderer);
+                this.mainInstList.drawOnPassRenderer(this.renderHelper.renderCache, passRenderer);
+                if (!textInCubePass) {
+                    this.textInstList.drawOnPassRenderer(this.renderHelper.renderCache, passRenderer);
+                }
             });
         });
 
+        // The first five refractive cube passes are back faces.
+        if (this.backfaceCubeInstList.renderInsts.length) {
+            const sceneColorResolveTextureID = builder.resolveRenderTarget(mainColorTargetID);
+            builder.pushPass((pass) => {
+                pass.setDebugName("Back Face Cube Pass");
+                pass.attachResolveTexture(sceneColorResolveTextureID);
+                pass.attachRenderTargetID(GfxrAttachmentSlot.Color0, mainColorTargetID);
+                pass.exec((passRenderer, scope) => {
+                    const sceneColorTexture = scope.getResolveTextureForID(sceneColorResolveTextureID);
+                    this.backfaceCubeInstList.resolveLateSamplerBinding("sceneColor", {
+                        gfxTexture: sceneColorTexture,
+                        gfxSampler: this.clampSampler
+                    });
+                    this.backfaceCubeInstList.drawOnPassRenderer(this.renderHelper.renderCache, passRenderer);
+                });
+            });
+        }
+
+        // The last five refractive cube passes are front faces.
+        if (this.frontfaceCubeInstList.renderInsts.length) {
+            const sceneColorResolveTextureID = builder.resolveRenderTarget(mainColorTargetID);
+            builder.pushPass((pass) => {
+                pass.setDebugName("Front Face Cube Pass");
+                pass.attachResolveTexture(sceneColorResolveTextureID);
+                pass.attachRenderTargetID(GfxrAttachmentSlot.Color0, mainColorTargetID);
+                pass.exec((passRenderer, scope) => {
+                    const sceneColorTexture = scope.getResolveTextureForID(sceneColorResolveTextureID);
+                    this.frontfaceCubeInstList.resolveLateSamplerBinding("sceneColor", {
+                        gfxTexture: sceneColorTexture,
+                        gfxSampler: this.clampSampler
+                    });
+                    this.frontfaceCubeInstList.drawOnPassRenderer(this.renderHelper.renderCache, passRenderer);
+                    if (textInCubePass) {
+                        this.textInstList.drawOnPassRenderer(this.renderHelper.renderCache, passRenderer);
+                    }
+                });
+            });
+        }
+
         this.renderHelper.renderInstManager.popTemplate();
-
         this.renderHelper.debugDraw.pushPasses(builder, mainColorTargetID, mainDepthTargetID);
-
         this.renderHelper.antialiasingSupport.pushPasses(builder, viewerInput, mainColorTargetID);
-
         builder.resolveRenderTargetToExternalTexture(mainColorTargetID, viewerInput.onscreenTexture);
-
         this.renderHelper.prepareToRender();
-
         builder.execute();
     }
 
@@ -1179,6 +1245,7 @@ class BIOSScene implements SceneGfx, RenderInterface {
         this.openingFogGeometry.destroy(device);
         this.openingFlaresGeometry.destroy(device);
         this.linesGeometry.destroy(device);
+        this.multipassCubeGeometry.destroy(device);
 
         this.biosROM.destroy(device);
 
@@ -1191,7 +1258,7 @@ class OsdSysSceneDesc implements SceneDesc {
     }
 
     public async createScene(device: GfxDevice, sceneContext: SceneContext): Promise<SceneGfx> {
-        const biosBuffer = await sceneContext.dataFetcher.fetchData(`${pathBase}/SCPH-70004_BIOS_V12_PAL_200.BIN`);
+        const biosBuffer = await sceneContext.dataFetcher.fetchData("PS2OsdSys/SCPH-70004_BIOS_V12_PAL_200.BIN");
         return new BIOSScene(sceneContext, new BIOSROM(biosBuffer, sceneContext.device));
     }
 }

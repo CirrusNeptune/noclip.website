@@ -106,7 +106,7 @@ export default class LinesGeometry {
 
         this.gfxProgram = cache.createProgram(new LinesProgram());
 
-        // Vertex data for flares, large outer color and small inner highlight
+        // Vertex data for one line segment
         const vertexData = new Float32Array(4 * NUM_VERTEX_FLOATS);
         vertexData.set([
             //   Line Quad
@@ -212,6 +212,6 @@ export default class LinesGeometry {
             depthWrite: false,
         });
 
-        renderInterface.renderInstList.submitRenderInst(renderInst);
+        renderInterface.mainInstList.submitRenderInst(renderInst);
     }
 }

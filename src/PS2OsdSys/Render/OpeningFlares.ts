@@ -221,6 +221,6 @@ export default class OpeningFlaresGeometry {
             depthWrite: false,
         });
 
-        renderInterface.renderInstList.submitRenderInst(renderInst);
+        renderInterface.mainInstList.submitRenderInst(renderInst);
     }
 }

@@ -16,8 +16,8 @@ export enum OsdSysPixelStorageFormat {
     IBlackA8         = 0x04, // 8bpp Alpha expanded to 32bpp black RGB + A
     IA8              = 0x05, // 16bpp Intensity + Alpha expanded to 32bpp RGBA
     // Next three enums aren't actually in the original, they're hard-coded in an asset-specific loader
-    I8HalfAlpha      = 0x06, // 8bpp Intensity expanded to 32bpp RGB + 50% Alpha
-    RGB8HalfAlpha2x2 = 0x07, // 24bpp RGB expanded to 32bpp RGB + 50% Alpha in a 2x2 repeated tile layout
+    I8Alpha127       = 0x06, // 8bpp Intensity expanded to 32bpp RGB + 0x7f Alpha
+    RGB8Alpha1272x2  = 0x07, // 24bpp RGB expanded to 32bpp RGB + 0x7f Alpha in a 2x2 repeated tile layout
     BrowserTexture   = 0x08, // A texture with an actual header!
     PSMCT16S         = GSPixelStorageFormat.PSMCT16S,
     PSMT8            = GSPixelStorageFormat.PSMT8,
@@ -89,12 +89,12 @@ const TEXTURE_INFOS: Map<ResourceID, TextureInfo> = new Map<ResourceID, TextureI
     [ResourceID.TEXOPNGC, { width: 512, height: 128, mipCount: 1, imageOffset: 0, psm: OsdSysPixelStorageFormat.PSMT4, clut: AA_TEXT_CLUT }],
 
     // Clock Textures
-    [ResourceID.TEXCFLOW, { width: 64, height: 64, mipCount: 1, imageOffset: 0, psm: OsdSysPixelStorageFormat.I8HalfAlpha }],
-    [ResourceID.TEXCKABE, { width: 128, height: 128, mipCount: 1, imageOffset: 0, psm: OsdSysPixelStorageFormat.RGB8HalfAlpha2x2 }],
-    [ResourceID.TEXCBUMP, { width: 64, height: 64, mipCount: 1, imageOffset: 0, psm: OsdSysPixelStorageFormat.I8HalfAlpha }],
-    [ResourceID.TEXCBINV, { width: 64, height: 64, mipCount: 1, imageOffset: 0, psm: OsdSysPixelStorageFormat.I8HalfAlpha }],
+    [ResourceID.TEXCFLOW, { width: 64, height: 64, mipCount: 1, imageOffset: 0, psm: OsdSysPixelStorageFormat.I8Alpha127 }],
+    [ResourceID.TEXCKABE, { width: 128, height: 128, mipCount: 1, imageOffset: 0, psm: OsdSysPixelStorageFormat.RGB8Alpha1272x2 }],
+    [ResourceID.TEXCBUMP, { width: 64, height: 64, mipCount: 1, imageOffset: 0, psm: OsdSysPixelStorageFormat.I8Alpha127 }],
+    [ResourceID.TEXCBINV, { width: 64, height: 64, mipCount: 1, imageOffset: 0, psm: OsdSysPixelStorageFormat.I8Alpha127 }],
     [ResourceID.TEXCSMOK, { width: 64, height: 64, mipCount: 1, imageOffset: 0, psm: OsdSysPixelStorageFormat.IWhiteA8 }],
-    [ResourceID.TEXCREFA, { width: 64, height: 64, mipCount: 1, imageOffset: 0, psm: OsdSysPixelStorageFormat.I8HalfAlpha }],
+    [ResourceID.TEXCREFA, { width: 64, height: 64, mipCount: 1, imageOffset: 0, psm: OsdSysPixelStorageFormat.I8Alpha127 }],
     [ResourceID.TEXCNAVI, { width: 64, height: 64, mipCount: 1, imageOffset: 0, psm: OsdSysPixelStorageFormat.IWhiteA8 }],
     [ResourceID.TEXCBLUR, { width: 64, height: 64, mipCount: 1, imageOffset: 0, psm: OsdSysPixelStorageFormat.IWhiteA8 }],
     [ResourceID.TEXCSTSL, { width: 64, height: 64, mipCount: 1, imageOffset: 0, psm: OsdSysPixelStorageFormat.IA8 }],
@@ -188,7 +188,7 @@ function readI8Pixels(info: TextureInfo, data: ArrayBufferSlice, out: Uint8Array
     }
 }
 
-function readI8HalfAlphaPixels(info: TextureInfo, data: ArrayBufferSlice, out: Uint8Array) {
+function readI8Alpha127Pixels(info: TextureInfo, data: ArrayBufferSlice, out: Uint8Array) {
     const data8 = data.createTypedArray(Uint8Array);
     const numPixels = info.width * info.height;
     for (let i = 0; i < numPixels; ++i) {
@@ -200,7 +200,7 @@ function readI8HalfAlphaPixels(info: TextureInfo, data: ArrayBufferSlice, out: U
     }
 }
 
-function readI8HalfAlpha2x2Pixels(info: TextureInfo, data: ArrayBufferSlice, out: Uint8Array) {
+function readI8Alpha1272x2Pixels(info: TextureInfo, data: ArrayBufferSlice, out: Uint8Array) {
     function writeIntensity(x: number, y: number, intensity: number) {
         const index = y * info.width + x;
         out[index * 4] = intensity;
@@ -300,9 +300,14 @@ function parseBrowserTextureInfo(data: ArrayBufferSlice): TextureInfo {
     }
 }
 
+// Keep the raw pixels of these around to build TEXOFOGC.
 let TEXOFOG4Pixels: Uint8Array | null = null;
 let TEXOFOG2Pixels: Uint8Array | null = null;
 let TEXOFOG1Pixels: Uint8Array | null = null;
+
+// Keep the raw pixels of these around to build TEXOCUBE.
+let TEXOBLPRPixels: Uint8Array | null = null;
+let TEXOBLPPixels: Uint8Array | null = null;
 
 export function loadTexture(id: ResourceID, data: ArrayBufferSlice, device: GfxDevice): Texture {
     let info = assertExists(TEXTURE_INFOS.get(id));
@@ -332,11 +337,11 @@ export function loadTexture(id: ResourceID, data: ArrayBufferSlice, device: GfxD
         case OsdSysPixelStorageFormat.IA8:
             readI8Pixels(info, dataSlice, pixels);
             break;
-        case OsdSysPixelStorageFormat.I8HalfAlpha:
-            readI8HalfAlphaPixels(info, dataSlice, pixels);
+        case OsdSysPixelStorageFormat.I8Alpha127:
+            readI8Alpha127Pixels(info, dataSlice, pixels);
             break;
-        case OsdSysPixelStorageFormat.RGB8HalfAlpha2x2:
-            readI8HalfAlpha2x2Pixels(info, dataSlice, pixels);
+        case OsdSysPixelStorageFormat.RGB8Alpha1272x2:
+            readI8Alpha1272x2Pixels(info, dataSlice, pixels);
             break;
         case OsdSysPixelStorageFormat.PSMT8:
             readPSMT8Pixels(info, dataSlice, pixels);
@@ -354,6 +359,10 @@ export function loadTexture(id: ResourceID, data: ArrayBufferSlice, device: GfxD
         TEXOFOG2Pixels = pixels;
     else if (id === ResourceID.TEXOFOG1)
         TEXOFOG1Pixels = pixels;
+    else if (id === ResourceID.TEXOBLPR)
+        TEXOBLPRPixels = pixels;
+    else if (id === ResourceID.TEXOBLP)
+        TEXOBLPPixels = pixels;
 
     const gfxTexture = device.createTexture(
         makeTextureDescriptor2D(GfxFormat.U8_RGBA_NORM, info.width, info.height, 1));
@@ -394,6 +403,38 @@ export function buildTEXOFOGC(device: GfxDevice): Texture {
 
     device.uploadTextureData(gfxTexture, 0, [pixels]);
     device.setResourceName(gfxTexture, ResourceID[ResourceID.TEXOFOGC]);
+
+    const extraInfo = new Map<string, string>();
+    extraInfo.set("Format", OsdSysPixelStorageFormat[OsdSysPixelStorageFormat.PSMCT32]);
+    return {
+        gfxTexture,
+        extraInfo
+    };
+}
+
+// For optimal drawing of multipass cube, pack alpha values of TEXOBLPR,TEXOBLP
+// into one texture. See Render/MultipassCube.ts for implementation.
+export function buildTEXOBLPC(device: GfxDevice): Texture {
+    const TEXOBLPR = assertExists(TEXOBLPRPixels);
+    const TEXOBLP = assertExists(TEXOBLPPixels);
+
+    const pixels = new Uint8Array(64 * 64 * 4);
+    for (let i = 0; i < 64 * 64; ++i) {
+        pixels[i * 4] = TEXOBLPR[i * 4 + 3];
+        pixels[i * 4 + 1] = TEXOBLP[i * 4 + 3];
+        pixels[i * 4 + 2] = 0x0;
+        pixels[i * 4 + 3] = 0xff;
+    }
+
+    // Done with these, let GC get em
+    TEXOBLPRPixels = null;
+    TEXOBLPPixels = null;
+
+    const gfxTexture = device.createTexture(
+        makeTextureDescriptor2D(GfxFormat.U8_RGBA_NORM, 64, 64, 1));
+
+    device.uploadTextureData(gfxTexture, 0, [pixels]);
+    device.setResourceName(gfxTexture, ResourceID[ResourceID.TEXOBLPC]);
 
     const extraInfo = new Map<string, string>();
     extraInfo.set("Format", OsdSysPixelStorageFormat[OsdSysPixelStorageFormat.PSMCT32]);
