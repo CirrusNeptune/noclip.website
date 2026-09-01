@@ -35,6 +35,11 @@ enum FontelloIcon {
     resize_small = '\ue803',
     play = '\ue804',
     fast_backward = '\ue805',
+    volume_off = '\ue806',
+    volume_down = '\ue807',
+    volume = '\ue808',
+    volume_up = '\ue809',
+    cw = '\ue80a',
 };
 
 function setFontelloIcon(elem: HTMLElement, icon: FontelloIcon): void {
@@ -2352,6 +2357,75 @@ export class LayerPanel extends Panel {
     }
 }
 
+class VolumeSlider implements BottomBarWidget {
+    public elem: HTMLElement;
+    private ball: HTMLElement;
+
+    static readonly BAR_WIDTH: number = 128;
+
+    constructor() {
+        this.elem = document.createElement('div');
+        this.elem.style.position = 'relative';
+        this.elem.style.width = `${VolumeSlider.BAR_WIDTH}px`;
+        this.elem.style.height = '100%';
+        this.elem.style.display = 'flex';
+        this.elem.style.alignItems = 'center';
+        this.elem.style.pointerEvents = 'auto';
+        this.elem.onpointerdown = this.onPointerDown.bind(this);
+
+        const bar = document.createElement('div');
+        bar.style.backgroundColor = 'white';
+        bar.style.width = '100%';
+        bar.style.height = '3px';
+        bar.style.borderRadius = '2px';
+        bar.style.userSelect = 'none';
+        this.elem.appendChild(bar);
+
+        this.ball = document.createElement('div');
+        this.ball.style.backgroundColor = 'white';
+        this.ball.style.position = 'absolute';
+        this.ball.style.width = '16px';
+        this.ball.style.height = '16px';
+        this.ball.style.borderRadius = '8px';
+        this.ball.style.left = '-8px';
+        this.ball.style.pointerEvents = 'auto';
+        this.ball.style.userSelect = 'none';
+        this.ball.onpointerdown = this.onPointerDown.bind(this);
+        this.ball.onpointerup = this.onPointerUp.bind(this);
+        this.ball.onpointercancel = this.onPointerUp.bind(this);
+        this.elem.appendChild(this.ball);
+    }
+
+    private onPointerDown(ev: PointerEvent) {
+        this.ball.onpointermove = this.onPointerMove.bind(this);
+        this.ball.setPointerCapture(ev.pointerId);
+        this.onPointerMove(ev);
+    }
+
+    private onPointerMove(ev: PointerEvent) {
+        const elemRect = this.elem.getBoundingClientRect();
+        const newX = clamp(ev.x, elemRect.left, elemRect.right) - elemRect.left;
+        console.log(`${newX / (elemRect.right - elemRect.left)}`);
+        this.ball.style.left = `${newX - 8}px`;
+    }
+
+    private onPointerUp(ev: PointerEvent) {
+        this.ball.onpointermove = null;
+        this.ball.releasePointerCapture(ev.pointerId);
+    }
+
+    public setVisible(v: boolean): void {
+        this.elem.style.display = v ? 'flex' : 'none';
+    }
+
+    public setArea(): void {
+    }
+
+    public isAnyPanelExpanded(): boolean {
+        return false;
+    }
+}
+
 class CameraSpeedIndicator implements BottomBarWidget {
     public elem: HTMLElement;
 
@@ -2710,6 +2784,48 @@ class ShareButton extends PanelButton {
     }
 }
 
+class MuteButton extends SingleIconButton {
+    public reloadIcon: HTMLElement;
+
+    constructor() {
+        super();
+
+        this.reloadIcon = document.createElement('div');
+        this.reloadIcon.style.position = 'absolute';
+        this.reloadIcon.style.left = '10px';
+        this.reloadIcon.style.top = '13px';
+        this.reloadIcon.style.width = '6px';
+        this.reloadIcon.style.height = '6px';
+        this.reloadIcon.style.cursor = 'pointer';
+        this.reloadIcon.style.font = '6px monospace';
+        this.reloadIcon.style.color = 'black';
+        this.reloadIcon.style.lineHeight = '6px';
+        this.reloadIcon.style.textShadow = '0px 0px 6px rgba(0, 0, 0, 0.5)';
+        this.reloadIcon.style.transition = '0.1s ease-out';
+        this.reloadIcon.style.userSelect = 'none';
+        setFontelloIcon(this.reloadIcon, FontelloIcon.cw);
+        this.elem.appendChild(this.reloadIcon);
+
+        this.syncStyle();
+    }
+
+    private mute: boolean = false;
+    private isMute() {
+        return this.mute;
+    }
+
+    public override syncStyle() {
+        super.syncStyle();
+        setFontelloIcon(this.icon, this.isMute() ? FontelloIcon.volume_off : FontelloIcon.volume);
+        this.tooltipElem.textContent = this.isMute() ? 'Unmute' : 'Mute';
+    }
+
+    public onClick() {
+        this.mute = !this.mute;
+        this.syncStyle();
+    }
+}
+
 class FullscreenButton extends SingleIconButton {
     constructor() {
         super();
@@ -2779,6 +2895,8 @@ export class UI {
     private studioSidePanel: StudioSidePanel;
     private studioPanel: StudioPanel;
 
+    public muteButton = new MuteButton();
+    public volumeSlider = new VolumeSlider();
     public cameraSpeedIndicator = new CameraSpeedIndicator();
     private bottomBar = new BottomBar();
     public playPauseButton = new PlayPauseButton();
@@ -2844,6 +2962,8 @@ export class UI {
         this.toplevel.appendChild(this.debugFloaterHolder.elem);
 
         this.toplevel.appendChild(this.bottomBar.elem);
+        this.bottomBar.addWidgets(BottomBarArea.Left, this.muteButton);
+        this.bottomBar.addWidgets(BottomBarArea.Left, this.volumeSlider);
         this.bottomBar.addWidgets(BottomBarArea.Left, this.cameraSpeedIndicator);
         this.bottomBar.addWidgets(BottomBarArea.Center, this.playPauseButton);
         this.bottomBar.addWidgets(BottomBarArea.Right, this.shareButton);

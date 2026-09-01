@@ -5,3 +5,8 @@
 .icon-resize-small-1:before { content: '\e803'; } /* '' */
 .icon-play:before { content: '\e804'; } /* '' */
 .icon-fast-backward:before { content: '\e805'; } /* '' */
+.icon-volume-off-1:before { content: '\e806'; } /* '' */
+.icon-volume-down-1:before { content: '\e807'; } /* '' */
+.icon-volume:before { content: '\e808'; } /* '' */
+.icon-volume-up-1:before { content: '\e809'; } /* '' */
+.icon-cw:before { content: '\e80a'; } /* '' */

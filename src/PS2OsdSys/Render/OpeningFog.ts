@@ -13,7 +13,7 @@ import {
     GfxVertexBufferFrequency
 } from "../../gfx/platform/GfxPlatform";
 import {GfxFormat} from "../../gfx/platform/GfxPlatformFormat";
-import RenderInterface from "./RenderInterface";
+import IBIOSScene from "../IBIOSScene";
 import {BaseProgram} from "./Base";
 import {assert, assertExists} from "../../util";
 import {ResourceID} from "../ResourceIDs";
@@ -179,15 +179,15 @@ export default class OpeningFogGeometry {
         device.destroyBuffer(this.indexBuffer);
     }
 
-    public draw(renderInterface: RenderInterface, fogTexScrolls: number[]){
+    public draw(biosScene: IBIOSScene, fogTexScrolls: number[]){
         assert(fogTexScrolls.length === 6);
 
-        const renderInst = renderInterface.renderHelper.renderInstManager.newRenderInst();
+        const renderInst = biosScene.renderHelper.renderInstManager.newRenderInst();
 
         renderInst.setGfxProgram(this.gfxProgram);
 
         renderInst.setSamplerBindings(0, [
-            {gfxTexture: this.fogTexture, gfxSampler: renderInterface.linearSampler},
+            {gfxTexture: this.fogTexture, gfxSampler: biosScene.linearSampler},
         ]);
 
         renderInst.setVertexInput(
@@ -223,6 +223,6 @@ export default class OpeningFogGeometry {
             cullMode: GfxCullMode.None
         });
 
-        renderInterface.mainInstList.submitRenderInst(renderInst);
+        biosScene.mainInstList.submitRenderInst(renderInst);
     }
 }

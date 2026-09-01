@@ -10,22 +10,21 @@ import {
     GfxVertexBufferFrequency
 } from "../../gfx/platform/GfxPlatform";
 import {GfxFormat} from "../../gfx/platform/GfxPlatformFormat";
-import {mat4} from "gl-matrix";
+import {mat4, vec3} from "gl-matrix";
 import {fillMatrix4x3, fillVec4} from "../../gfx/helpers/UniformBufferHelpers";
-import RenderInterface from "./RenderInterface";
+import IBIOSScene from "../IBIOSScene";
 import {BIOSROM} from "../BIOSROM";
-import {assertExists} from "../../util";
+import {assert, assertExists} from "../../util";
 import {ResourceID} from "../ResourceIDs";
 import {BaseProgram} from "./Base";
 import {clamp, setMatrixTranslation} from "../../MathHelpers";
 
-export const NUM_CUBES = 6;
+export const NUM_CUBES = 5;
 
 class MultipassCubeProgram extends BaseProgram {
     public static a_Position = 0;
     public static a_Normal = 1;
     public static a_TexCoord = 2;
-    public static a_VertIdx = 3;
 
     public static ub_MultipassCubeParams = 1;
 
@@ -35,7 +34,6 @@ ${MultipassCubeProgram.Common}
 layout(location = ${MultipassCubeProgram.a_Position}) in vec3 a_Position;
 layout(location = ${MultipassCubeProgram.a_Normal}) in vec3 a_Normal;
 layout(location = ${MultipassCubeProgram.a_TexCoord}) in vec2 a_TexCoord;
-layout(location = ${MultipassCubeProgram.a_VertIdx}) in float a_VertIdx;
 
 out vec2 v_ViewNormal2D;
 out vec2 v_CubeCenter2D;
@@ -43,6 +41,8 @@ out vec2 v_BlprTexCoord;
 out vec2 v_BlpTexCoord;
 out vec2 v_RefTexCoord;
 out float v_CameraNormalDot;
+out float v_VizNormalDot;
+out vec3 v_VizNormalWorld;
 
 void main() {
     mat4x3 t_CubeWorldFromLocal = UnpackMatrix(u_CubeWorldFromLocal[gl_InstanceID]);
@@ -60,16 +60,20 @@ void main() {
     v_ViewNormal2D = t_NormalView.xy;
 
     vec3 t_PositionView = (t_ViewFromWorld * vec4(t_PositionWorld, 1.0f)).xyz;
-    float t_CameraNormalDot = abs(dot(normalize(t_PositionView), t_NormalWorld));
+    //t_PositionView.z = -t_PositionView.z;
+    vec3 t_PositionViewNorm = normalize(t_PositionView);
+    float t_CameraNormalDot = abs(dot(t_PositionViewNorm, t_NormalView));
     t_CameraNormalDot = 1.0 - t_CameraNormalDot;
     v_CameraNormalDot = t_CameraNormalDot * t_CameraNormalDot * 0.5;
+    v_VizNormalDot = t_CameraNormalDot;
+    v_VizNormalWorld = t_NormalView;
 
     float BlpScroll = u_Magnification_Refraction_BlpScroll_RefOffset.z;
     v_BlprTexCoord = a_TexCoord - vec2(BlpScroll, -BlpScroll);
     v_BlpTexCoord = a_TexCoord + vec2(BlpScroll, -BlpScroll);
 
     float RefOffset = u_Magnification_Refraction_BlpScroll_RefOffset.w;
-    v_RefTexCoord = ((normalize(t_PositionView) + t_NormalView * -RefOffset) + 0.5).xy;
+    v_RefTexCoord = ((t_PositionViewNorm + t_NormalView * -RefOffset) + 0.5).xy;
 }
 `;
 
@@ -82,6 +86,8 @@ in vec2 v_BlprTexCoord;
 in vec2 v_BlpTexCoord;
 in vec2 v_RefTexCoord;
 in float v_CameraNormalDot;
+in float v_VizNormalDot;
+in vec3 v_VizNormalWorld;
 
 void main() {
     float Magnification = u_Magnification_Refraction_BlpScroll_RefOffset.x;
@@ -89,19 +95,24 @@ void main() {
     float SceneFix = u_SceneFix_RefFix.x;
     float RefFix = u_SceneFix_RefFix.y;
 
+    // Use refraction proportions of a 4:3 aspect ratio.
     ivec2 SceneSize = textureSize(TEXTURE(u_SceneTexture), 0);
     vec2 HalfSceneSize = vec2(SceneSize) * 0.5;
+    vec2 HalfSceneSize4x3 = vec2(HalfSceneSize.y * 4.0 / 3.0, HalfSceneSize.y);
 
+    // Scene UV calculations performed in fragment shader to avoid interference from perspective correction.
+    // WebGL does not have portable noperspective sadly.
     vec2 CubeCenterScreen = v_CubeCenter2D * HalfSceneSize + HalfSceneSize;
-    vec2 RefractOffset = v_ViewNormal2D * HalfSceneSize * Refraction * gl_FragCoord.w * 4.0;
+    vec2 RefractOffset = v_ViewNormal2D * HalfSceneSize4x3 * Refraction * gl_FragCoord.w * -4.0;
     vec2 MagnificationOffset = (gl_FragCoord.xy - CubeCenterScreen) * Magnification;
-    ivec2 ScreenCoord = clamp(ivec2(gl_FragCoord.xy + RefractOffset + MagnificationOffset), ivec2(0), SceneSize - ivec2(1));
-    vec2 HalfTexelCoordSize = 0.5 / vec2(SceneSize); // Sample from texel center to avoid filtering (but still have a clamping sampler)
-    vec3 SceneColor = texture(SAMPLER_2D(u_SceneTexture), vec2(ScreenCoord) / vec2(SceneSize) + HalfTexelCoordSize).rgb;
+    vec2 ScreenCoord = clamp(gl_FragCoord.xy + RefractOffset + MagnificationOffset, vec2(0.0), vec2(SceneSize - ivec2(1)));
+    vec2 SampleCenter = (ScreenCoord + 0.5) / vec2(SceneSize);
+    vec3 SceneColor = texture(SAMPLER_2D(u_SceneTexture), SampleCenter).rgb;
     vec3 ModulatedColor = SceneColor * (u_CubeColors.rgb + v_CameraNormalDot * 32.0) * SceneFix / 128.0 / 128.0;
 
+    // TODO: review modulation uniforms
     vec3 Ref = texture(SAMPLER_2D(u_RefTexture), v_RefTexCoord).rgb;
-    vec3 ModulatedRef = Ref * u_CubeColors.rgb * (v_CameraNormalDot * 0.4 * 0.6 + 0.2) * RefFix / 128.0 / 128.0;
+    vec3 ModulatedRef = Ref * u_CubeColors.rgb * (v_CameraNormalDot * 0.4 * 0.6 + 0.2) * RefFix / 64.0 / 128.0;
 
     float Blpr = texture(SAMPLER_2D(u_BlpcTexture), v_BlprTexCoord).r;
     ModulatedColor += ModulatedRef * Blpr;
@@ -110,6 +121,8 @@ void main() {
     ModulatedColor += ModulatedRef * Blp;
 
     gl_FragColor = vec4(ModulatedColor, 1.0);
+    //gl_FragColor = vec4(v_VizNormalWorld, 1.0);
+    //gl_FragColor = vec4(vec3((v_CameraNormalDot * 0.4 * 0.6 + 0.2)), 1.0);
 }
 `;
 
@@ -132,7 +145,14 @@ uniform sampler2D u_RefTexture;
 
 const NUM_FACES = 6;
 const VERTS_PER_FACE = 4;
-const NUM_VERTEX_FLOATS = 9;
+const NUM_VERTEX_FLOATS = 8;
+
+export interface CubeParams {
+    cubeRotations: vec3[],
+    cubeTranslations: vec3[],
+    cubeExtent: number,
+    colorBias: vec3,
+}
 
 export default class MultipassCubeGeometry {
     private readonly vertexBuffer: GfxBuffer;
@@ -155,46 +175,46 @@ export default class MultipassCubeGeometry {
         const vertexData = new Float32Array(NUM_FACES * VERTS_PER_FACE * NUM_VERTEX_FLOATS);
         vertexData.set([
             //   Face 5 - Front 0
-            //   X   Y   Z    NX   NY   NZ     U  V     VIDX
-             1, -1, -1,      0,  0, -1,        1, 0,    1, // 1
-             1,  1, -1,      0,  0, -1,        1, 1,    3, // 3
-            -1, -1, -1,      0,  0, -1,        0, 0,    0, // 0
-            -1,  1, -1,      0,  0, -1,        0, 1,    2, // 2
+            //   X   Y   Z    NX   NY   NZ     U  V
+             1, -1, -1,      0,  0, -1,        1, 0, // 1
+             1,  1, -1,      0,  0, -1,        1, 1, // 3
+            -1, -1, -1,      0,  0, -1,        0, 0, // 0
+            -1,  1, -1,      0,  0, -1,        0, 1, // 2
 
             //   Face 0 - Back 1
-            //   X   Y   Z    NX   NY   NZ     U  V     VIDX
-             1, -1,  1,      0,  0,  1,        0, 0,    5, // 0
-            -1, -1,  1,      0,  0,  1,        1, 0,    4, // 1
-             1,  1,  1,      0,  0,  1,        0, 1,    7, // 2
-            -1,  1,  1,      0,  0,  1,        1, 1,    6, // 3
+            //   X   Y   Z    NX   NY   NZ     U  V
+             1, -1,  1,      0,  0,  1,        0, 0, // 0
+            -1, -1,  1,      0,  0,  1,        1, 0, // 1
+             1,  1,  1,      0,  0,  1,        0, 1, // 2
+            -1,  1,  1,      0,  0,  1,        1, 1, // 3
 
             //   Face 4 - Left 2
-            //   X   Y   Z    NX   NY   NZ     U  V     VIDX
-            -1, -1, -1,     -1,  0,  0,        1, 0,    0, // 1
-            -1,  1, -1,     -1,  0,  0,        1, 1,    2, // 3
-            -1, -1,  1,     -1,  0,  0,        0, 0,    4, // 0
-            -1,  1,  1,     -1,  0,  0,        0, 1,    6, // 2
+            //   X   Y   Z    NX   NY   NZ     U  V
+            -1, -1, -1,     -1,  0,  0,        1, 0, // 1
+            -1,  1, -1,     -1,  0,  0,        1, 1, // 3
+            -1, -1,  1,     -1,  0,  0,        0, 0, // 0
+            -1,  1,  1,     -1,  0,  0,        0, 1, // 2
 
             //   Face 2 - Top 3
-            //   X   Y   Z    NX   NY   NZ     U  V     VIDX
-             1,  1,  1,      0,  1,  0,        1, 1,    7, // 3
-            -1,  1,  1,      0,  1,  0,        0, 1,    6, // 2
-             1,  1, -1,      0,  1,  0,        1, 0,    3, // 1
-            -1,  1, -1,      0,  1,  0,        0, 0,    2, // 0
+            //   X   Y   Z    NX   NY   NZ     U  V
+             1,  1,  1,      0,  1,  0,        1, 1, // 3
+            -1,  1,  1,      0,  1,  0,        0, 1, // 2
+             1,  1, -1,      0,  1,  0,        1, 0, // 1
+            -1,  1, -1,      0,  1,  0,        0, 0, // 0
 
             //   Face 3 - Right 4
-            //   X   Y   Z    NX   NY   NZ     U  V     VIDX
-             1, -1,  1,      1,  0,  0,        1, 0,    5, // 1
-             1,  1,  1,      1,  0,  0,        1, 1,    7, // 3
-             1, -1, -1,      1,  0,  0,        0, 0,    1, // 0
-             1,  1, -1,      1,  0,  0,        0, 1,    3, // 2
+            //   X   Y   Z    NX   NY   NZ     U  V
+             1, -1,  1,      1,  0,  0,        1, 0, // 1
+             1,  1,  1,      1,  0,  0,        1, 1, // 3
+             1, -1, -1,      1,  0,  0,        0, 0, // 0
+             1,  1, -1,      1,  0,  0,        0, 1, // 2
 
             //   Face 1 - Bottom 5
-            //   X   Y   Z    NX   NY   NZ     U  V     VIDX
-             1, -1, -1,      0, -1,  0,        1, 1,    1, // 3
-            -1, -1, -1,      0, -1,  0,        0, 1,    0, // 2
-             1, -1,  1,      0, -1,  0,        1, 0,    5, // 1
-            -1, -1,  1,      0, -1,  0,        0, 0,    4, // 0
+            //   X   Y   Z    NX   NY   NZ     U  V
+             1, -1, -1,      0, -1,  0,        1, 1, // 3
+            -1, -1, -1,      0, -1,  0,        0, 1, // 2
+             1, -1,  1,      0, -1,  0,        1, 0, // 1
+            -1, -1,  1,      0, -1,  0,        0, 0, // 0
         ]);
 
         this.indexCount = NUM_FACES * 6;
@@ -236,12 +256,6 @@ export default class MultipassCubeGeometry {
                     bufferByteOffset: 6 * 4,
                     bufferIndex: 0,
                 },
-                {
-                    location: MultipassCubeProgram.a_VertIdx,
-                    format: GfxFormat.F32_R,
-                    bufferByteOffset: 8 * 4,
-                    bufferIndex: 0,
-                },
             ],
 
             vertexBufferDescriptors: [
@@ -260,10 +274,13 @@ export default class MultipassCubeGeometry {
         device.destroyBuffer(this.indexBuffer);
     }
 
-    private drawInternal(renderInterface: RenderInterface, frontface: boolean, magnification: number,
+    private drawInternal(biosScene: IBIOSScene, frontface: boolean, magnification: number,
                          refraction: number, blpScroll: number, refOffset: number, sceneFix: number,
-                         refFix: number, time: number) {
-        const renderInst = renderInterface.renderHelper.renderInstManager.newRenderInst();
+                         refFix: number, params: CubeParams) {
+        assert(params.cubeRotations.length === NUM_CUBES);
+        assert(params.cubeTranslations.length === NUM_CUBES);
+
+        const renderInst = biosScene.renderHelper.renderInstManager.newRenderInst();
         renderInst.setBindingLayouts([
             { numSamplers: 3, numUniformBuffers: 2 },
         ]);
@@ -272,8 +289,8 @@ export default class MultipassCubeGeometry {
 
         renderInst.setSamplerBindings(0, [
             { gfxTexture: null, gfxSampler: null, lateBinding: "sceneColor" },
-            { gfxTexture: this.blpcTexture, gfxSampler: renderInterface.linearSampler },
-            { gfxTexture: this.refTexture, gfxSampler: renderInterface.linearSampler },
+            { gfxTexture: this.blpcTexture, gfxSampler: biosScene.linearSampler },
+            { gfxTexture: this.refTexture, gfxSampler: biosScene.linearSampler },
         ]);
 
         renderInst.setVertexInput(
@@ -292,17 +309,18 @@ export default class MultipassCubeGeometry {
         let offs = 0;
         for (let i = 0; i < NUM_CUBES; ++i) {
             const cubeMatrix = mat4.create();
-            mat4.scale(cubeMatrix, cubeMatrix, [1.8, 1.8, 1.8]);
-            mat4.rotateX(cubeMatrix, cubeMatrix, time * 0.7);
-            mat4.rotateY(cubeMatrix, cubeMatrix, time * 0.3);
-            setMatrixTranslation(cubeMatrix, [((i % 3) >>> 0) * 6 - 6, ((i / 3) >>> 0) * 6 - 3, 60]);
+            mat4.scale(cubeMatrix, cubeMatrix, [params.cubeExtent, params.cubeExtent, params.cubeExtent]);
+            mat4.rotateZ(cubeMatrix, cubeMatrix, params.cubeRotations[i][2]);
+            mat4.rotateY(cubeMatrix, cubeMatrix, params.cubeRotations[i][1]);
+            mat4.rotateX(cubeMatrix, cubeMatrix, params.cubeRotations[i][0]);
+            setMatrixTranslation(cubeMatrix, params.cubeTranslations[i]);
             offs += fillMatrix4x3(cubeParams, offs, cubeMatrix);
         }
 
         offs += fillVec4(cubeParams, offs,
-            clamp(128 - 16, 0, 127),
-            clamp(128 - 16, 0, 127),
-            clamp(128 + 24, 0, 127));
+            clamp(128 + params.colorBias[0], 0, 127),
+            clamp(128 + params.colorBias[1], 0, 127),
+            clamp(128 + params.colorBias[2], 0, 127));
 
         offs += fillVec4(cubeParams, offs, magnification, refraction, blpScroll, refOffset);
 
@@ -314,12 +332,12 @@ export default class MultipassCubeGeometry {
             cullMode: frontface ? GfxCullMode.Back : GfxCullMode.Front,
         });
 
-        const instList = frontface ? renderInterface.frontfaceCubeInstList : renderInterface.backfaceCubeInstList;
+        const instList = frontface ? biosScene.frontfaceRefractInstList : biosScene.backfaceRefractInstList;
         instList.submitRenderInst(renderInst);
     }
 
-    public draw(renderInterface: RenderInterface, time: number){
-        this.drawInternal(renderInterface, false, 0.0, 1.0, 0.00375, -0.25, 122, 42, time);
-        this.drawInternal(renderInterface, true, -0.084, 1.0, 0.0075, 0.5, 240, 64, time);
+    public draw(biosScene: IBIOSScene, params: CubeParams){
+        this.drawInternal(biosScene, false, 0.0, 1.0, 0.00375, -0.25, 122, 42, params);
+        this.drawInternal(biosScene, true, -0.084, 1.0, 0.0075, 0.5, 240, 64, params);
     }
 }

@@ -16,7 +16,7 @@ import {
 import {GfxFormat} from "../../gfx/platform/GfxPlatformFormat";
 import {vec3, vec4} from "gl-matrix";
 import {fillVec3v, fillVec4v} from "../../gfx/helpers/UniformBufferHelpers";
-import RenderInterface from "./RenderInterface";
+import IBIOSScene from "../IBIOSScene";
 import {assert} from "../../util";
 import {BaseProgram} from "./Base";
 
@@ -154,10 +154,10 @@ export default class LinesGeometry {
         device.destroyBuffer(this.indexBuffer);
     }
 
-    public draw(renderInterface: RenderInterface, lines: vec3[], lineColors: vec4[], cameraAspect: number){
+    public draw(biosScene: IBIOSScene, lines: vec3[], lineColors: vec4[]){
         assert(lines.length <= MAX_LINE_SEGMENTS * 2);
 
-        const renderInst = renderInterface.renderHelper.renderInstManager.newRenderInst();
+        const renderInst = biosScene.renderHelper.renderInstManager.newRenderInst();
         renderInst.setBindingLayouts([
             { numSamplers: 0, numUniformBuffers: 3 },
         ]);
@@ -181,7 +181,7 @@ export default class LinesGeometry {
             offs += fillVec3v(linePosBuf, offs, lines[i]);
         }
 
-        linePosBuf[3] = 1.0 / cameraAspect;
+        linePosBuf[3] = 1.0 / biosScene.cameraAspect;
 
         const lineColorBuf = renderInst.allocateUniformBufferF32(
             LinesProgram.ub_LineColor, 4 * MAX_LINE_SEGMENTS * 2);
@@ -212,6 +212,6 @@ export default class LinesGeometry {
             depthWrite: false,
         });
 
-        renderInterface.mainInstList.submitRenderInst(renderInst);
+        biosScene.mainInstList.submitRenderInst(renderInst);
     }
 }

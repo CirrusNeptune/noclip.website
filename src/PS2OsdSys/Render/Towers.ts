@@ -15,7 +15,7 @@ import {
 import {GfxFormat} from "../../gfx/platform/GfxPlatformFormat";
 import {mat4} from "gl-matrix";
 import {fillMatrix4x3} from "../../gfx/helpers/UniformBufferHelpers";
-import RenderInterface from "./RenderInterface";
+import IBIOSScene from "../IBIOSScene";
 import {BIOSROM} from "../BIOSROM";
 import {assert, assertExists} from "../../util";
 import {ResourceID} from "../ResourceIDs";
@@ -220,18 +220,18 @@ export default class TowersGeometry {
         device.destroyBuffer(this.indexBuffer);
     }
 
-    public draw(renderInterface: RenderInterface, objectMats: mat4[], lightVectorMats: mat4[], colorMultipliers: number[], texScrolls: number[]){
+    public draw(biosScene: IBIOSScene, objectMats: mat4[], lightVectorMats: mat4[], colorMultipliers: number[], texScrolls: number[]){
         assert(objectMats.length === NUM_TOWERS);
         assert(lightVectorMats.length === NUM_TOWERS);
         assert(colorMultipliers.length === NUM_TOWERS);
         assert(texScrolls.length === NUM_TOWERS);
 
-        const renderInst = renderInterface.renderHelper.renderInstManager.newRenderInst();
+        const renderInst = biosScene.renderHelper.renderInstManager.newRenderInst();
 
         renderInst.setGfxProgram(this.gfxProgram);
 
         renderInst.setSamplerBindings(0, [
-            { gfxTexture: this.wallTexture, gfxSampler: renderInterface.linearSampler }
+            { gfxTexture: this.wallTexture, gfxSampler: biosScene.linearSampler }
         ]);
 
         renderInst.setVertexInput(
@@ -265,6 +265,6 @@ export default class TowersGeometry {
 
         renderInst.setMegaStateFlags({ cullMode: GfxCullMode.None });
 
-        renderInterface.mainInstList.submitRenderInst(renderInst);
+        biosScene.mainInstList.submitRenderInst(renderInst);
     }
 }
