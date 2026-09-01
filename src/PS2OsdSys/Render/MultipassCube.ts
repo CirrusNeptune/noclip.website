@@ -41,8 +41,6 @@ out vec2 v_BlprTexCoord;
 out vec2 v_BlpTexCoord;
 out vec2 v_RefTexCoord;
 out float v_CameraNormalDot;
-out float v_VizNormalDot;
-out vec3 v_VizNormalWorld;
 
 void main() {
     mat4x3 t_CubeWorldFromLocal = UnpackMatrix(u_CubeWorldFromLocal[gl_InstanceID]);
@@ -60,13 +58,10 @@ void main() {
     v_ViewNormal2D = t_NormalView.xy;
 
     vec3 t_PositionView = (t_ViewFromWorld * vec4(t_PositionWorld, 1.0f)).xyz;
-    //t_PositionView.z = -t_PositionView.z;
     vec3 t_PositionViewNorm = normalize(t_PositionView);
     float t_CameraNormalDot = abs(dot(t_PositionViewNorm, t_NormalView));
     t_CameraNormalDot = 1.0 - t_CameraNormalDot;
     v_CameraNormalDot = t_CameraNormalDot * t_CameraNormalDot * 0.5;
-    v_VizNormalDot = t_CameraNormalDot;
-    v_VizNormalWorld = t_NormalView;
 
     float BlpScroll = u_Magnification_Refraction_BlpScroll_RefOffset.z;
     v_BlprTexCoord = a_TexCoord - vec2(BlpScroll, -BlpScroll);
@@ -86,8 +81,6 @@ in vec2 v_BlprTexCoord;
 in vec2 v_BlpTexCoord;
 in vec2 v_RefTexCoord;
 in float v_CameraNormalDot;
-in float v_VizNormalDot;
-in vec3 v_VizNormalWorld;
 
 void main() {
     float Magnification = u_Magnification_Refraction_BlpScroll_RefOffset.x;
@@ -121,8 +114,6 @@ void main() {
     ModulatedColor += ModulatedRef * Blp;
 
     gl_FragColor = vec4(ModulatedColor, 1.0);
-    //gl_FragColor = vec4(v_VizNormalWorld, 1.0);
-    //gl_FragColor = vec4(vec3((v_CameraNormalDot * 0.4 * 0.6 + 0.2)), 1.0);
 }
 `;
 
