@@ -19,6 +19,7 @@ import {fillVec3v, fillVec4v} from "../../gfx/helpers/UniformBufferHelpers";
 import IBIOSScene from "../IBIOSScene";
 import {assert} from "../../util";
 import {BaseProgram} from "./Base";
+import {GfxRenderInstList} from "../../gfx/render/GfxRenderInstManager";
 
 // This takes us right up to the 16K uniform block size limit imposed by Apple devices
 // and is coincidentally exactly what the flair trails need.
@@ -154,7 +155,7 @@ export default class LinesGeometry {
         device.destroyBuffer(this.indexBuffer);
     }
 
-    public draw(biosScene: IBIOSScene, lines: vec3[], lineColors: vec4[]){
+    public draw(biosScene: IBIOSScene, instList: GfxRenderInstList, lines: vec3[], lineColors: vec4[]){
         assert(lines.length <= MAX_LINE_SEGMENTS * 2);
 
         const renderInst = biosScene.renderHelper.renderInstManager.newRenderInst();
@@ -212,6 +213,6 @@ export default class LinesGeometry {
             depthWrite: false,
         });
 
-        biosScene.mainInstList.submitRenderInst(renderInst);
+        instList.submitRenderInst(renderInst);
     }
 }

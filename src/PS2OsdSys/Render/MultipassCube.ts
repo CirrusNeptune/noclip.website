@@ -18,6 +18,7 @@ import {assert, assertExists} from "../../util";
 import {ResourceID} from "../ResourceIDs";
 import {BaseProgram} from "./Base";
 import {clamp, setMatrixTranslation} from "../../MathHelpers";
+import {GfxRenderInstList} from "../../gfx/render/GfxRenderInstManager";
 
 export const NUM_CUBES = 5;
 
@@ -265,7 +266,7 @@ export default class MultipassCubeGeometry {
         device.destroyBuffer(this.indexBuffer);
     }
 
-    private drawInternal(biosScene: IBIOSScene, frontface: boolean, magnification: number,
+    private drawInternal(biosScene: IBIOSScene, frontface: boolean, instList: GfxRenderInstList, magnification: number,
                          refraction: number, blpScroll: number, refOffset: number, sceneFix: number,
                          refFix: number, params: CubeParams) {
         assert(params.cubeRotations.length === NUM_CUBES);
@@ -323,12 +324,11 @@ export default class MultipassCubeGeometry {
             cullMode: frontface ? GfxCullMode.Back : GfxCullMode.Front,
         });
 
-        const instList = frontface ? biosScene.frontfaceRefractInstList : biosScene.backfaceRefractInstList;
         instList.submitRenderInst(renderInst);
     }
 
-    public draw(biosScene: IBIOSScene, params: CubeParams){
-        this.drawInternal(biosScene, false, 0.0, 1.0, 0.00375, -0.25, 122, 42, params);
-        this.drawInternal(biosScene, true, -0.084, 1.0, 0.0075, 0.5, 240, 64, params);
+    public draw(biosScene: IBIOSScene, frontfaceInstList: GfxRenderInstList, backfaceInstList: GfxRenderInstList, params: CubeParams){
+        this.drawInternal(biosScene, false, frontfaceInstList, 0.0, 1.0, 0.00375, -0.25, 122, 42, params);
+        this.drawInternal(biosScene, true, backfaceInstList, -0.084, 1.0, 0.0075, 0.5, 240, 64, params);
     }
 }

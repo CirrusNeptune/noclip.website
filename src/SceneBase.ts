@@ -36,9 +36,15 @@ export interface SceneContext {
     initialSceneTime: number;
 }
 
+export interface SceneAudioDesc {
+    initiallyPausedIfNotUserActivated: boolean;
+    playPauseAudioContextWithScene: boolean;
+}
+
 export interface SceneDesc {
     id: string;
     name: string;
+    audio?: SceneAudioDesc;
     createScene(device: GfxDevice, sceneContext: SceneContext): PromiseLike<SceneGfx>;
     hidden?: boolean;
 }

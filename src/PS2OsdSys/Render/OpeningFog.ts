@@ -18,6 +18,7 @@ import {BaseProgram} from "./Base";
 import {assert, assertExists} from "../../util";
 import {ResourceID} from "../ResourceIDs";
 import {BIOSROM} from "../BIOSROM";
+import {GfxRenderInstList} from "../../gfx/render/GfxRenderInstManager";
 
 class OpeningFogProgram extends BaseProgram {
     public static a_Position = 0;
@@ -179,7 +180,7 @@ export default class OpeningFogGeometry {
         device.destroyBuffer(this.indexBuffer);
     }
 
-    public draw(biosScene: IBIOSScene, fogTexScrolls: number[]){
+    public draw(biosScene: IBIOSScene, instList: GfxRenderInstList, fogTexScrolls: number[]){
         assert(fogTexScrolls.length === 6);
 
         const renderInst = biosScene.renderHelper.renderInstManager.newRenderInst();
@@ -223,6 +224,6 @@ export default class OpeningFogGeometry {
             cullMode: GfxCullMode.None
         });
 
-        biosScene.mainInstList.submitRenderInst(renderInst);
+        instList.submitRenderInst(renderInst);
     }
 }

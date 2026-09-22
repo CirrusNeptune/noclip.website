@@ -1,7 +1,15 @@
 import ArrayBufferSlice from "../ArrayBufferSlice";
 import {assertExists} from "../util";
 import { HD, parseHD, SQ, parseSQ } from "./OsdSnd/OsdSnd";
-import {buildTEXOBLPC, buildTEXOFOGC, loadTexture, Texture} from "./Textures";
+import {
+    buildTEXCCRYS,
+    buildTEXOBLPC,
+    buildTEXOFOGC,
+    loadTexture,
+    makeTextureLoadContext,
+    Texture,
+    TextureLoadContext
+} from "./Textures";
 import {GfxDevice} from "../gfx/platform/GfxPlatform";
 import {ResourceID} from "./ResourceIDs";
 
@@ -148,18 +156,23 @@ export class BIOSROM {
             }
         }
 
+        const loadContext: TextureLoadContext = makeTextureLoadContext();
+
         // Load TEXIMAGE span of resources.
         const texImage = ROMImage.parse(mainImage.get(ResourceID[ResourceID.TEXIMAGE]));
         for (let i = ResourceID.TEXIMAGE + 1; i < ResourceID.ICOIMAGE; ++i) {
             const id: ResourceID = i;
-            this.textures.set(id, loadTexture(id, decompress(texImage.get(ResourceID[id])), device));
+            this.textures.set(id, loadTexture(id, decompress(texImage.get(ResourceID[id])), device, loadContext));
         }
 
         // Combine TEXOFOG4,2,1 into channel-packed texture.
-        this.textures.set(ResourceID.TEXOFOGC, buildTEXOFOGC(device));
+        this.textures.set(ResourceID.TEXOFOGC, buildTEXOFOGC(device, loadContext));
 
         // Combine TEXOBLPR,TEXOBLP into channel-packed texture.
-        this.textures.set(ResourceID.TEXOBLPC, buildTEXOBLPC(device));
+        this.textures.set(ResourceID.TEXOBLPC, buildTEXOBLPC(device, loadContext));
+
+        // Combine TEXCBUMP,TEXCBINV,TEXCFLOW into channel-packed texture.
+        this.textures.set(ResourceID.TEXCCRYS, buildTEXCCRYS(device, loadContext));
     }
 
     public destroy(device: GfxDevice) {

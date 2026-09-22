@@ -1,6 +1,7 @@
 import BaseDSP from "./BaseDSP";
 import { assert, assertExists, nArray } from "../../util";
 import { IS_DEVELOPMENT } from "../../BuildVersion";
+import {SceneAudioContext} from "../../viewer";
 
 /**
  * volMode === SPU_VOICE_DIRECT: [-0x4000,0x3fff]
@@ -240,6 +241,10 @@ export abstract class SPU2 extends BaseDSP {
     private voices: SPUVoice[] = [];
     private sampleBuffers: Map<Uint8Array, SampleBuffer> = new Map<Uint8Array, SampleBuffer>();
 
+    protected constructor(audioContext: SceneAudioContext) {
+        super(audioContext);
+    }
+
     private static spuLogFormat(voice: SPUVoice, msg: any): string {
         return `[v:${voice.index}]${msg}`;
     }
@@ -251,20 +256,20 @@ export abstract class SPU2 extends BaseDSP {
     }
 
     private constructVoice(index: number): SPUVoice {
-        const adsrGainNode = this.audioContext.createGain();
+        const adsrGainNode = this.audioContext.audioContext.createGain();
         adsrGainNode.gain.value = 0;
-        const leftGainNode = this.audioContext.createGain();
+        const leftGainNode = this.audioContext.audioContext.createGain();
         leftGainNode.gain.value = 1;
-        const rightGainNode = this.audioContext.createGain();
+        const rightGainNode = this.audioContext.audioContext.createGain();
         rightGainNode.gain.value = 1;
 
         adsrGainNode.connect(leftGainNode);
         adsrGainNode.connect(rightGainNode);
 
-        const channelMergerNode = this.audioContext.createChannelMerger(2);
+        const channelMergerNode = this.audioContext.audioContext.createChannelMerger(2);
         leftGainNode.connect(channelMergerNode, 0, 0);
         rightGainNode.connect(channelMergerNode, 0, 1);
-        channelMergerNode.connect(this.audioContext.destination);
+        channelMergerNode.connect(this.audioContext.mainGainNode);
 
         return {
             index,
@@ -284,7 +289,7 @@ export abstract class SPU2 extends BaseDSP {
         this.voices = nArray(SPU2.NUM_VOICES, this.constructVoice.bind(this));
     }
 
-    public override async stop(): Promise<void> {
+    public override stop(): void {
         this.voices = [];
         return super.stop();
     }
@@ -340,7 +345,7 @@ export abstract class SPU2 extends BaseDSP {
         }
 
         const numFrames = (endBlock - startBlock) * SPU2.NUM_BLOCK_SAMPLES;
-        const audioBuffer = this.audioContext.createBuffer(1, numFrames, SPU2.VOICE_SAMPLE_RATE);
+        const audioBuffer = this.audioContext.audioContext.createBuffer(1, numFrames, SPU2.VOICE_SAMPLE_RATE);
         const channelData = audioBuffer.getChannelData(0);
 
         let h1 = 0;
@@ -410,7 +415,7 @@ export abstract class SPU2 extends BaseDSP {
 
     private makeAudioBufferSource(addr: SampleBufferAndOffset): AudioBufferSourceNode {
         const buffer = this.getSampleBuffer(addr);
-        const source = this.audioContext.createBufferSource();
+        const source = this.audioContext.audioContext.createBufferSource();
         source.buffer = buffer.audioBuffer;
         source.loop = buffer.loop;
         source.loopStart = buffer.loopStart;

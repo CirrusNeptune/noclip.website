@@ -3,11 +3,15 @@ import {nArray} from "../util";
 import {CubeParams, NUM_CUBES} from "./Render/MultipassCube";
 import {clamp, lerp, MathConstants, setMatrixTranslation} from "../MathHelpers";
 import {lerpAngleVec3, normalizeAngleVec3, normalLightMatrix, zeroMatrix} from "./Util";
-import {NUM_TOWERS, TOWER_GRID_HEIGHT, TOWER_GRID_WIDTH} from "./Render/Towers";
+import TowersGeometry, {NUM_TOWERS, TOWER_GRID_HEIGHT, TOWER_GRID_WIDTH} from "./Render/Towers";
 import {NUM_HISTORY_SLOTS} from "./MCHistory";
 import IBIOSScene from "./IBIOSScene";
 import {NUM_FLARE_OVERDRAWS, NUM_FLARES} from "./Render/OpeningFlares";
-import {BIOSModule, StableStateOps} from "./BIOSModule";
+import {BIOSModule, DrawParams, StableStateOps} from "./BIOSModule";
+import {GfxSampler} from "../gfx/platform/GfxPlatformImpl";
+import OpeningFogGeometry from "./Render/OpeningFog";
+import {GfxRenderInstList} from "../gfx/render/GfxRenderInstManager";
+import {GfxrAttachmentSlot} from "../gfx/render/GfxRenderGraph";
 
 const scratchVec: vec3 = vec3.create();
 const halfVec: vec3 = vec3.fromValues(0.5, 0.5, 0.5);
@@ -407,6 +411,11 @@ const STABLE_STATE_OPS: StableStateOps<StableState> = {
 };
 
 export class OpeningModule extends BIOSModule<StableState> {
+    public mainInstList = new GfxRenderInstList();
+    public backfaceRefractInstList = new GfxRenderInstList();
+    public frontfaceRefractInstList = new GfxRenderInstList();
+    public textInstList = new GfxRenderInstList();
+
     private frameCounter: number = 0;
     private entryOverallOpeningState = OverallOpeningState.OpeningScreen;
     private overallOpeningState: OverallOpeningState = OverallOpeningState.OpeningScreen;
@@ -582,6 +591,7 @@ export class OpeningModule extends BIOSModule<StableState> {
 
         this.biosScene.towersGeometry.draw(
             this.biosScene,
+            this.mainInstList,
             this.towerObjectMats,
             this.towerObjectLightVectorMats,
             this.towerColorMultipliers,
@@ -594,7 +604,7 @@ export class OpeningModule extends BIOSModule<StableState> {
         for (let i = 0; i < 6; ++i) {
             this.fogTexScrolls[i] = (((14 - i) * 0.0001 * (i + 1) / 2) * this.drawStableState.frameCounter) % 1;
         }
-        this.biosScene.openingFogGeometry.draw(this.biosScene, this.fogTexScrolls);
+        this.biosScene.openingFogGeometry.draw(this.biosScene, this.mainInstList, this.fogTexScrolls);
     }
 
     private flareTranslationBuf: vec3[] = nArray(NUM_FLARES * NUM_FLARE_OVERDRAWS, vec3.create);
@@ -623,7 +633,7 @@ export class OpeningModule extends BIOSModule<StableState> {
             }
         }
 
-        this.biosScene.openingFlaresGeometry.draw(this.biosScene, this.flareTranslationBuf, FLARE_COLORS);
+        this.biosScene.openingFlaresGeometry.draw(this.biosScene, this.mainInstList, this.flareTranslationBuf, FLARE_COLORS);
 
         if (this.flareHistoryLastFrame !== this.drawStableState.frameCounter >>> 0) {
             this.flareHistoryLastFrame = this.drawStableState.frameCounter >>> 0;
@@ -666,7 +676,7 @@ export class OpeningModule extends BIOSModule<StableState> {
             }
         }
 
-        this.biosScene.linesGeometry.draw(this.biosScene, this.flareLineSegs, this.flareLineColorSegs);
+        this.biosScene.linesGeometry.draw(this.biosScene, this.mainInstList, this.flareLineSegs, this.flareLineColorSegs);
     }
 
     private tickCubes() {
@@ -684,7 +694,7 @@ export class OpeningModule extends BIOSModule<StableState> {
             cubeExtent: 1.8,
             colorBias: CUBE_COLOR_BIAS,
         };
-        this.biosScene.multipassCubeGeometry.draw(this.biosScene, params);
+        this.biosScene.multipassCubeGeometry.draw(this.biosScene, this.frontfaceRefractInstList, this.backfaceRefractInstList, params);
     }
 
     private openingInit_0021e578() {
@@ -945,7 +955,7 @@ export class OpeningModule extends BIOSModule<StableState> {
         this.frameCounter += 1;
     }
 
-    public draw() {
+    public draw(params: DrawParams) {
         if (this.overallOpeningState === OverallOpeningState.Done) {
             return;
         }
@@ -955,6 +965,61 @@ export class OpeningModule extends BIOSModule<StableState> {
         this.drawTextFade();
 
         // TODO: Letterbox
+
+        // Route text to the final on-screen pass for this frame.
+        const textInCubePass = this.frontfaceRefractInstList.renderInsts.length !== 0;
+
+        // Main on-screen pass (towers, fog, flares).
+        params.builder.pushPass((pass) => {
+            pass.setDebugName("Main Pass");
+            pass.attachRenderTargetID(GfxrAttachmentSlot.Color0, params.mainColorTargetID);
+            pass.attachRenderTargetID(GfxrAttachmentSlot.DepthStencil, params.mainDepthTargetID);
+            pass.exec((passRenderer, scope) => {
+                this.mainInstList.drawOnPassRenderer(this.biosScene.renderHelper.renderCache, passRenderer);
+                if (!textInCubePass) {
+                    this.textInstList.drawOnPassRenderer(this.biosScene.renderHelper.renderCache, passRenderer);
+                }
+            });
+        });
+
+        // Refractive back faces.
+        if (this.backfaceRefractInstList.renderInsts.length) {
+            const sceneColorResolveTextureID = params.builder.resolveRenderTarget(params.mainColorTargetID);
+            params.builder.pushPass((pass) => {
+                pass.setDebugName("Back Face Refract Pass");
+                pass.attachResolveTexture(sceneColorResolveTextureID);
+                pass.attachRenderTargetID(GfxrAttachmentSlot.Color0, params.mainColorTargetID);
+                pass.exec((passRenderer, scope) => {
+                    const sceneColorTexture = scope.getResolveTextureForID(sceneColorResolveTextureID);
+                    this.backfaceRefractInstList.resolveLateSamplerBinding("sceneColor", {
+                        gfxTexture: sceneColorTexture,
+                        gfxSampler: this.biosScene.clampSampler
+                    });
+                    this.backfaceRefractInstList.drawOnPassRenderer(this.biosScene.renderHelper.renderCache, passRenderer);
+                });
+            });
+        }
+
+        // Refractive front faces.
+        if (this.frontfaceRefractInstList.renderInsts.length) {
+            const sceneColorResolveTextureID = params.builder.resolveRenderTarget(params.mainColorTargetID);
+            params.builder.pushPass((pass) => {
+                pass.setDebugName("Front Face Refract Pass");
+                pass.attachResolveTexture(sceneColorResolveTextureID);
+                pass.attachRenderTargetID(GfxrAttachmentSlot.Color0, params.mainColorTargetID);
+                pass.exec((passRenderer, scope) => {
+                    const sceneColorTexture = scope.getResolveTextureForID(sceneColorResolveTextureID);
+                    this.frontfaceRefractInstList.resolveLateSamplerBinding("sceneColor", {
+                        gfxTexture: sceneColorTexture,
+                        gfxSampler: this.biosScene.clampSampler
+                    });
+                    this.frontfaceRefractInstList.drawOnPassRenderer(this.biosScene.renderHelper.renderCache, passRenderer);
+                    if (textInCubePass) {
+                        this.textInstList.drawOnPassRenderer(this.biosScene.renderHelper.renderCache, passRenderer);
+                    }
+                });
+            });
+        }
     }
 
     public updateCameraMatrix(cameraMatrix: mat4, roll: boolean) {

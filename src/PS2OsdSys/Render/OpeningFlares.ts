@@ -15,13 +15,14 @@ import {
     GfxVertexBufferFrequency
 } from "../../gfx/platform/GfxPlatform";
 import {GfxFormat} from "../../gfx/platform/GfxPlatformFormat";
-import {mat4, vec3, vec4} from "gl-matrix";
-import {fillMatrix4x3, fillVec3v, fillVec4v} from "../../gfx/helpers/UniformBufferHelpers";
+import {vec3, vec4} from "gl-matrix";
+import {fillVec3v, fillVec4v} from "../../gfx/helpers/UniformBufferHelpers";
 import IBIOSScene from "../IBIOSScene";
 import {BIOSROM} from "../BIOSROM";
 import {assert, assertExists} from "../../util";
 import {ResourceID} from "../ResourceIDs";
 import {BaseProgram} from "./Base";
+import {GfxRenderInstList} from "../../gfx/render/GfxRenderInstManager";
 
 export const NUM_FLARES = 4;
 export const NUM_FLARE_OVERDRAWS = 4;
@@ -167,7 +168,7 @@ export default class OpeningFlaresGeometry {
         device.destroyBuffer(this.indexBuffer);
     }
 
-    public draw(biosScene: IBIOSScene, flarePos: vec3[], flareColors: vec4[]){
+    public draw(biosScene: IBIOSScene, instList: GfxRenderInstList, flarePos: vec3[], flareColors: vec4[]){
         assert(flarePos.length === NUM_FLARES * NUM_FLARE_OVERDRAWS);
         assert(flareColors.length === NUM_FLARES);
 
@@ -221,6 +222,6 @@ export default class OpeningFlaresGeometry {
             depthWrite: false,
         });
 
-        biosScene.mainInstList.submitRenderInst(renderInst);
+        instList.submitRenderInst(renderInst);
     }
 }

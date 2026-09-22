@@ -9,8 +9,8 @@ import {GfxDevice, GfxMipFilterMode, GfxSampler, GfxTexFilterMode, GfxWrapMode} 
 import {GfxrAttachmentSlot} from "../gfx/render/GfxRenderGraph";
 import {GfxRenderHelper} from "../gfx/render/GfxRenderHelper";
 import {GfxRenderInst, GfxRenderInstList} from "../gfx/render/GfxRenderInstManager";
-import {SceneContext, SceneDesc, SceneGroup} from "../SceneBase";
-import {SceneGfx, ViewerRenderInput} from "../viewer";
+import {SceneAudioDesc, SceneContext, SceneDesc, SceneGroup} from "../SceneBase";
+import {SceneAudioContext, SceneGfx, ViewerRenderInput} from "../viewer";
 import * as UI from "../ui";
 import {FakeTextureHolder} from "../TextureHolder";
 import {BIOSROM} from "./BIOSROM";
@@ -30,6 +30,9 @@ import MultipassCubeGeometry from "./Render/MultipassCube";
 import {OpeningModule, OverallOpeningState} from "./Opening";
 import {BIOSModule} from "./BIOSModule";
 import ArrayBufferSlice from "../ArrayBufferSlice";
+import ClockBGGeometry from "./Render/ClockBG";
+import {ClockModule} from "./Clock";
+import ClockCrystalGeometry from "./Render/ClockCrystal";
 
 export const noclipSpaceFromOsdSysSpace = mat4.fromValues(
     -1, 0,  0, 0,
@@ -44,11 +47,6 @@ class BIOSScene implements SceneGfx, IBIOSScene {
     public renderHelper: GfxRenderHelper;
     private inputManager: InputManager;
 
-    public mainInstList = new GfxRenderInstList();
-    public backfaceRefractInstList = new GfxRenderInstList();
-    public frontfaceRefractInstList = new GfxRenderInstList();
-    public textInstList = new GfxRenderInstList();
-
     public linearSampler: GfxSampler;
     public clampSampler: GfxSampler;
 
@@ -57,10 +55,12 @@ class BIOSScene implements SceneGfx, IBIOSScene {
     public openingFlaresGeometry: OpeningFlaresGeometry;
     public linesGeometry: LinesGeometry;
     public multipassCubeGeometry: MultipassCubeGeometry;
+    public clockBGGeometry: ClockBGGeometry;
+    public clockCrystalGeometry: ClockCrystalGeometry;
 
     public textureHolder = new FakeTextureHolder([]);
 
-    private osdSnd: OsdSnd;
+    private osdSnd: OsdSnd | null = null;
     private sequenceStates: Map<ResourceID, SequenceState> = new Map<ResourceID, SequenceState>();
 
     public mcHistory: MCHistoryEntry[];
@@ -73,15 +73,6 @@ class BIOSScene implements SceneGfx, IBIOSScene {
     constructor(private sceneContext: SceneContext, private biosROM: BIOSROM) {
         this.inputManager = sceneContext.inputManager;
         sceneContext.viewerInput.camera.fovY = 0.4604391746;
-
-        this.osdSnd = new OsdSnd();
-        const uniqueHDs = new Set<HD>();
-        this.biosROM.sequences.forEach((pair, id) => {
-            this.sequenceStates.set(id, this.osdSnd.addSQ(pair.hd, pair.sq));
-            uniqueHDs.add(pair.hd);
-        });
-        this.osdSnd.start();
-        uniqueHDs.forEach((hd) => this.osdSnd.precacheSamples(hd));
 
         biosROM.textures.forEach((texture) => {
             this.textureHolder.viewerTextures.push(texture);
@@ -96,6 +87,8 @@ class BIOSScene implements SceneGfx, IBIOSScene {
         this.openingFlaresGeometry = new OpeningFlaresGeometry(cache, this.biosROM);
         this.linesGeometry = new LinesGeometry(cache);
         this.multipassCubeGeometry = new MultipassCubeGeometry(cache, this.biosROM);
+        this.clockBGGeometry = new ClockBGGeometry(cache, this.biosROM);
+        this.clockCrystalGeometry = new ClockCrystalGeometry(cache, this.biosROM);
 
         this.linearSampler = cache.createSampler({
             minFilter: GfxTexFilterMode.Bilinear,
@@ -121,10 +114,22 @@ class BIOSScene implements SceneGfx, IBIOSScene {
         };
         this.mcHistory = simulatePlayer(playerSimulationParams);
 
-        // Give audio context some time to start
-        setTimeout(() => this.osdSnd.startSeq(assertExists(this.sequenceStates.get(ResourceID.SNDBOOTS))), 200);
+        //this.activeModule = new OpeningModule(this, OverallOpeningState.OpeningScreen);
+        this.activeModule = new ClockModule(this);
+    }
 
-        this.activeModule = new OpeningModule(this, OverallOpeningState.OpeningScreen);
+    public receiveAudioContext(audioContext: SceneAudioContext): void {
+        this.osdSnd = new OsdSnd(audioContext);
+        const uniqueHDs = new Set<HD>();
+        this.biosROM.sequences.forEach((pair, id) => {
+            this.sequenceStates.set(id, this.osdSnd!.addSQ(pair.hd, pair.sq));
+            uniqueHDs.add(pair.hd);
+        });
+        this.osdSnd.start();
+        uniqueHDs.forEach((hd) => this.osdSnd!.precacheSamples(hd));
+
+        // Give audio context some time to start
+        setTimeout(() => this.osdSnd!.startSeq(assertExists(this.sequenceStates.get(ResourceID.SNDBOOTS))), 200);
     }
 
     private freeCam: boolean = false;
@@ -198,9 +203,6 @@ class BIOSScene implements SceneGfx, IBIOSScene {
         ]);
         this.updateAndFillSceneParams(template, viewerInput);
 
-        // This will update our uniforms and populate the inst lists.
-        this.activeModule.draw();
-
         const builder = this.renderHelper.renderGraph.newGraphBuilder();
 
         const mainColorDesc = makeBackbufferDescSimple(GfxrAttachmentSlot.Color0, viewerInput, opaqueBlackFullClearRenderPassDescriptor);
@@ -209,60 +211,12 @@ class BIOSScene implements SceneGfx, IBIOSScene {
         const mainColorTargetID = builder.createRenderTargetID(mainColorDesc, 'Main Color');
         const mainDepthTargetID = builder.createRenderTargetID(mainDepthDesc, 'Main Depth');
 
-        // Route text to the final on-screen pass for this frame.
-        const textInCubePass = this.frontfaceRefractInstList.renderInsts.length !== 0;
-
-        // Main on-screen pass (towers, fog, flares).
-        builder.pushPass((pass) => {
-            pass.setDebugName("Main Pass");
-            pass.attachRenderTargetID(GfxrAttachmentSlot.Color0, mainColorTargetID);
-            pass.attachRenderTargetID(GfxrAttachmentSlot.DepthStencil, mainDepthTargetID);
-            pass.exec((passRenderer, scope) => {
-                this.mainInstList.drawOnPassRenderer(this.renderHelper.renderCache, passRenderer);
-                if (!textInCubePass) {
-                    this.textInstList.drawOnPassRenderer(this.renderHelper.renderCache, passRenderer);
-                }
-            });
+        // This will update our uniforms and populate the inst lists.
+        this.activeModule.draw({
+            builder,
+            mainColorTargetID,
+            mainDepthTargetID
         });
-
-        // Refractive back faces.
-        if (this.backfaceRefractInstList.renderInsts.length) {
-            const sceneColorResolveTextureID = builder.resolveRenderTarget(mainColorTargetID);
-            builder.pushPass((pass) => {
-                pass.setDebugName("Back Face Refract Pass");
-                pass.attachResolveTexture(sceneColorResolveTextureID);
-                pass.attachRenderTargetID(GfxrAttachmentSlot.Color0, mainColorTargetID);
-                pass.exec((passRenderer, scope) => {
-                    const sceneColorTexture = scope.getResolveTextureForID(sceneColorResolveTextureID);
-                    this.backfaceRefractInstList.resolveLateSamplerBinding("sceneColor", {
-                        gfxTexture: sceneColorTexture,
-                        gfxSampler: this.clampSampler
-                    });
-                    this.backfaceRefractInstList.drawOnPassRenderer(this.renderHelper.renderCache, passRenderer);
-                });
-            });
-        }
-
-        // Refractive front faces.
-        if (this.frontfaceRefractInstList.renderInsts.length) {
-            const sceneColorResolveTextureID = builder.resolveRenderTarget(mainColorTargetID);
-            builder.pushPass((pass) => {
-                pass.setDebugName("Front Face Refract Pass");
-                pass.attachResolveTexture(sceneColorResolveTextureID);
-                pass.attachRenderTargetID(GfxrAttachmentSlot.Color0, mainColorTargetID);
-                pass.exec((passRenderer, scope) => {
-                    const sceneColorTexture = scope.getResolveTextureForID(sceneColorResolveTextureID);
-                    this.frontfaceRefractInstList.resolveLateSamplerBinding("sceneColor", {
-                        gfxTexture: sceneColorTexture,
-                        gfxSampler: this.clampSampler
-                    });
-                    this.frontfaceRefractInstList.drawOnPassRenderer(this.renderHelper.renderCache, passRenderer);
-                    if (textInCubePass) {
-                        this.textInstList.drawOnPassRenderer(this.renderHelper.renderCache, passRenderer);
-                    }
-                });
-            });
-        }
 
         this.renderHelper.renderInstManager.popTemplate();
         this.renderHelper.debugDraw.pushPasses(builder, mainColorTargetID, mainDepthTargetID);
@@ -291,15 +245,18 @@ class BIOSScene implements SceneGfx, IBIOSScene {
         this.openingFlaresGeometry.destroy(device);
         this.linesGeometry.destroy(device);
         this.multipassCubeGeometry.destroy(device);
+        this.clockBGGeometry.destroy(device);
+        this.clockCrystalGeometry.destroy(device);
 
         this.biosROM.destroy(device);
 
-        this.osdSnd.stop().then(r => {});
+        if (this.osdSnd !== null)
+            this.osdSnd.stop();
     }
 }
 
 class OsdSysSceneDesc implements SceneDesc {
-    constructor(public id: string, public name: string) {
+    constructor(public id: string, public name: string, public audio?: SceneAudioDesc) {
     }
 
     public async createScene(device: GfxDevice, sceneContext: SceneContext): Promise<SceneGfx> {
@@ -312,6 +269,9 @@ export const sceneGroup: SceneGroup = {
     id: "PS2Bios",
     name: "PS2 Bios",
     sceneDescs: [
-        new OsdSysSceneDesc("BIOS", "BIOS"),
+        new OsdSysSceneDesc("BIOS", "BIOS", {
+            initiallyPausedIfNotUserActivated: true,
+            playPauseAudioContextWithScene: true,
+        }),
     ],
 };

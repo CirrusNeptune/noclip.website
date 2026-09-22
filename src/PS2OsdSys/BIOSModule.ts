@@ -2,8 +2,15 @@ import {mat4} from "gl-matrix";
 import {assert, assertExists} from "../util";
 import {clamp} from "../MathHelpers";
 import IBIOSScene from "./IBIOSScene";
+import {GfxrGraphBuilder, GfxrRenderTargetID} from "../gfx/render/GfxRenderGraph";
 
 const STABLE_TICK_RATE = 1.0 / 60.0;
+
+export interface DrawParams {
+    builder: GfxrGraphBuilder,
+    mainColorTargetID: GfxrRenderTargetID,
+    mainDepthTargetID: GfxrRenderTargetID,
+}
 
 export interface StableStateOps<StableStateType> {
     makeStableState: () => StableStateType,
@@ -62,7 +69,7 @@ export abstract class BIOSModule<StableStateType> {
      *
      * Make all stable state accesses through this.drawStableState.
      */
-    public abstract draw(): void;
+    public abstract draw(params: DrawParams): void;
 
     public abstract updateCameraMatrix(cameraMatrix: mat4, roll: boolean): void;
 

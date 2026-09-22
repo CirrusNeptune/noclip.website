@@ -20,6 +20,7 @@ import {BIOSROM} from "../BIOSROM";
 import {assert, assertExists} from "../../util";
 import {ResourceID} from "../ResourceIDs";
 import {BaseProgram} from "./Base";
+import {GfxRenderInstList} from "../../gfx/render/GfxRenderInstManager";
 
 export const TOWER_GRID_WIDTH = 14;
 export const TOWER_GRID_HEIGHT = 9;
@@ -220,7 +221,7 @@ export default class TowersGeometry {
         device.destroyBuffer(this.indexBuffer);
     }
 
-    public draw(biosScene: IBIOSScene, objectMats: mat4[], lightVectorMats: mat4[], colorMultipliers: number[], texScrolls: number[]){
+    public draw(biosScene: IBIOSScene, instList: GfxRenderInstList, objectMats: mat4[], lightVectorMats: mat4[], colorMultipliers: number[], texScrolls: number[]){
         assert(objectMats.length === NUM_TOWERS);
         assert(lightVectorMats.length === NUM_TOWERS);
         assert(colorMultipliers.length === NUM_TOWERS);
@@ -265,6 +266,6 @@ export default class TowersGeometry {
 
         renderInst.setMegaStateFlags({ cullMode: GfxCullMode.None });
 
-        biosScene.mainInstList.submitRenderInst(renderInst);
+        instList.submitRenderInst(renderInst);
     }
 }

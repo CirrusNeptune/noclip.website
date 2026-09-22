@@ -2358,6 +2358,7 @@ export class LayerPanel extends Panel {
 }
 
 class VolumeSlider implements BottomBarWidget {
+    public onchanged: ((vol: number) => void) | null = null;
     public elem: HTMLElement;
     private ball: HTMLElement;
 
@@ -2368,7 +2369,7 @@ class VolumeSlider implements BottomBarWidget {
         this.elem.style.position = 'relative';
         this.elem.style.width = `${VolumeSlider.BAR_WIDTH}px`;
         this.elem.style.height = '100%';
-        this.elem.style.display = 'flex';
+        this.elem.style.display = 'none';
         this.elem.style.alignItems = 'center';
         this.elem.style.pointerEvents = 'auto';
         this.elem.onpointerdown = this.onPointerDown.bind(this);
@@ -2405,8 +2406,9 @@ class VolumeSlider implements BottomBarWidget {
     private onPointerMove(ev: PointerEvent) {
         const elemRect = this.elem.getBoundingClientRect();
         const newX = clamp(ev.x, elemRect.left, elemRect.right) - elemRect.left;
-        console.log(`${newX / (elemRect.right - elemRect.left)}`);
         this.ball.style.left = `${newX - 8}px`;
+        if (this.onchanged)
+            this.onchanged(newX / (elemRect.right - elemRect.left));
     }
 
     private onPointerUp(ev: PointerEvent) {
@@ -2416,6 +2418,12 @@ class VolumeSlider implements BottomBarWidget {
 
     public setVisible(v: boolean): void {
         this.elem.style.display = v ? 'flex' : 'none';
+    }
+
+    public setVolume(vol: number): void {
+        const elemRect = this.elem.getBoundingClientRect();
+        const newX = clamp(vol, 0, 1) * (elemRect.right - elemRect.left);
+        this.ball.style.left = `${newX - 8}px`;
     }
 
     public setArea(): void {
@@ -2785,33 +2793,22 @@ class ShareButton extends PanelButton {
 }
 
 class MuteButton extends SingleIconButton {
-    public reloadIcon: HTMLElement;
+    public onmuteunmute: ((muted: boolean) => void) | null = null;
 
     constructor() {
         super();
-
-        this.reloadIcon = document.createElement('div');
-        this.reloadIcon.style.position = 'absolute';
-        this.reloadIcon.style.left = '10px';
-        this.reloadIcon.style.top = '13px';
-        this.reloadIcon.style.width = '6px';
-        this.reloadIcon.style.height = '6px';
-        this.reloadIcon.style.cursor = 'pointer';
-        this.reloadIcon.style.font = '6px monospace';
-        this.reloadIcon.style.color = 'black';
-        this.reloadIcon.style.lineHeight = '6px';
-        this.reloadIcon.style.textShadow = '0px 0px 6px rgba(0, 0, 0, 0.5)';
-        this.reloadIcon.style.transition = '0.1s ease-out';
-        this.reloadIcon.style.userSelect = 'none';
-        setFontelloIcon(this.reloadIcon, FontelloIcon.cw);
-        this.elem.appendChild(this.reloadIcon);
-
+        this.elem.style.display = 'none';
         this.syncStyle();
     }
 
     private mute: boolean = false;
     private isMute() {
         return this.mute;
+    }
+
+    public setMute(mute: boolean) {
+        this.mute = mute;
+        this.syncStyle();
     }
 
     public override syncStyle() {
@@ -2821,8 +2818,9 @@ class MuteButton extends SingleIconButton {
     }
 
     public onClick() {
-        this.mute = !this.mute;
-        this.syncStyle();
+        this.setMute(!this.mute);
+        if (this.onmuteunmute !== null)
+            this.onmuteunmute(this.mute);
     }
 }
 
@@ -2855,7 +2853,12 @@ class FullscreenButton extends SingleIconButton {
 
 class PlayPauseButton extends SingleIconButton {
     public onplaypause: ((shouldBePlaying: boolean) => void) | null = null;
-    public isPlaying: boolean;
+    public isPlaying: boolean = false;
+
+    constructor() {
+        super();
+        this.syncStyle();
+    }
 
     public override syncStyle(): void {
         super.syncStyle();

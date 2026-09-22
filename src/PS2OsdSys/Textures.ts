@@ -200,12 +200,12 @@ function readI8Alpha127Pixels(info: TextureInfo, data: ArrayBufferSlice, out: Ui
     }
 }
 
-function readI8Alpha1272x2Pixels(info: TextureInfo, data: ArrayBufferSlice, out: Uint8Array) {
-    function writeIntensity(x: number, y: number, intensity: number) {
+function readRGB8Alpha1272x2Pixels(info: TextureInfo, data: ArrayBufferSlice, out: Uint8Array) {
+    function writeRGB(x: number, y: number, r: number, g: number, b: number) {
         const index = y * info.width + x;
-        out[index * 4] = intensity;
-        out[index * 4 + 1] = intensity;
-        out[index * 4 + 2] = intensity;
+        out[index * 4] = r;
+        out[index * 4 + 1] = g;
+        out[index * 4 + 2] = b;
         out[index * 4 + 3] = 0x7f;
     }
     const data8 = data.createTypedArray(Uint8Array);
@@ -213,11 +213,14 @@ function readI8Alpha1272x2Pixels(info: TextureInfo, data: ArrayBufferSlice, out:
     const hh = info.height >>> 1;
     for (let y = 0; y < hh; ++y) {
         for (let x = 0; x < hw; ++x) {
-            const intensity = data8[y * hw + x];
-            writeIntensity(x, y, intensity);
-            writeIntensity(x + hw, y, intensity);
-            writeIntensity(x, y + hh, intensity);
-            writeIntensity(x + hw, y + hh, intensity);
+            const base = (y * hw + x) * 3;
+            const r = data8[base];
+            const g = data8[base + 1];
+            const b = data8[base + 2];
+            writeRGB(x, y, r, g, b);
+            writeRGB(x + hw, y, r, g, b);
+            writeRGB(x, y + hh, r, g, b);
+            writeRGB(x + hw, y + hh, r, g, b);
         }
     }
 }
@@ -300,16 +303,36 @@ function parseBrowserTextureInfo(data: ArrayBufferSlice): TextureInfo {
     }
 }
 
-// Keep the raw pixels of these around to build TEXOFOGC.
-let TEXOFOG4Pixels: Uint8Array | null = null;
-let TEXOFOG2Pixels: Uint8Array | null = null;
-let TEXOFOG1Pixels: Uint8Array | null = null;
+export interface TextureLoadContext {
+    // Keep the raw pixels of these around to build TEXOFOGC.
+    TEXOFOG4Pixels: Uint8Array | null;
+    TEXOFOG2Pixels: Uint8Array | null;
+    TEXOFOG1Pixels: Uint8Array | null;
 
-// Keep the raw pixels of these around to build TEXOCUBE.
-let TEXOBLPRPixels: Uint8Array | null = null;
-let TEXOBLPPixels: Uint8Array | null = null;
+    // Keep the raw pixels of these around to build TEXOCUBE.
+    TEXOBLPRPixels: Uint8Array | null;
+    TEXOBLPPixels: Uint8Array | null;
 
-export function loadTexture(id: ResourceID, data: ArrayBufferSlice, device: GfxDevice): Texture {
+    // Keep the raw pixels of these around to build TEXCCRYS.
+    TEXCBUMPPixels: Uint8Array | null;
+    TEXCBINVPixels: Uint8Array | null;
+    TEXCFLOWPixels: Uint8Array | null;
+}
+
+export function makeTextureLoadContext(): TextureLoadContext {
+    return {
+        TEXOFOG4Pixels: null,
+        TEXOFOG2Pixels: null,
+        TEXOFOG1Pixels: null,
+        TEXOBLPRPixels: null,
+        TEXOBLPPixels: null,
+        TEXCBUMPPixels: null,
+        TEXCBINVPixels: null,
+        TEXCFLOWPixels: null,
+    };
+}
+
+export function loadTexture(id: ResourceID, data: ArrayBufferSlice, device: GfxDevice, context: TextureLoadContext): Texture {
     let info = assertExists(TEXTURE_INFOS.get(id));
     if (info.psm === OsdSysPixelStorageFormat.BrowserTexture) {
         info = parseBrowserTextureInfo(data);
@@ -341,7 +364,7 @@ export function loadTexture(id: ResourceID, data: ArrayBufferSlice, device: GfxD
             readI8Alpha127Pixels(info, dataSlice, pixels);
             break;
         case OsdSysPixelStorageFormat.RGB8Alpha1272x2:
-            readI8Alpha1272x2Pixels(info, dataSlice, pixels);
+            readRGB8Alpha1272x2Pixels(info, dataSlice, pixels);
             break;
         case OsdSysPixelStorageFormat.PSMT8:
             readPSMT8Pixels(info, dataSlice, pixels);
@@ -354,15 +377,21 @@ export function loadTexture(id: ResourceID, data: ArrayBufferSlice, device: GfxD
     }
 
     if (id === ResourceID.TEXOFOG4)
-        TEXOFOG4Pixels = pixels;
+        context.TEXOFOG4Pixels = pixels;
     else if (id === ResourceID.TEXOFOG2)
-        TEXOFOG2Pixels = pixels;
+        context.TEXOFOG2Pixels = pixels;
     else if (id === ResourceID.TEXOFOG1)
-        TEXOFOG1Pixels = pixels;
+        context.TEXOFOG1Pixels = pixels;
     else if (id === ResourceID.TEXOBLPR)
-        TEXOBLPRPixels = pixels;
+        context.TEXOBLPRPixels = pixels;
     else if (id === ResourceID.TEXOBLP)
-        TEXOBLPPixels = pixels;
+        context.TEXOBLPPixels = pixels;
+    else if (id === ResourceID.TEXCBUMP)
+        context.TEXCBUMPPixels = pixels;
+    else if (id === ResourceID.TEXCBINV)
+        context.TEXCBINVPixels = pixels;
+    else if (id === ResourceID.TEXCFLOW)
+        context.TEXCFLOWPixels = pixels;
 
     const gfxTexture = device.createTexture(
         makeTextureDescriptor2D(GfxFormat.U8_RGBA_NORM, info.width, info.height, 1));
@@ -380,10 +409,10 @@ export function loadTexture(id: ResourceID, data: ArrayBufferSlice, device: GfxD
 
 // For optimal drawing of fog layers, pack TEXOFOG4,2,1 into one texture.
 // See Render/OpeningFog.ts for implementation.
-export function buildTEXOFOGC(device: GfxDevice): Texture {
-    const TEXOFOG4 = assertExists(TEXOFOG4Pixels);
-    const TEXOFOG2 = assertExists(TEXOFOG2Pixels);
-    const TEXOFOG1 = assertExists(TEXOFOG1Pixels);
+export function buildTEXOFOGC(device: GfxDevice, context: TextureLoadContext): Texture {
+    const TEXOFOG4 = assertExists(context.TEXOFOG4Pixels);
+    const TEXOFOG2 = assertExists(context.TEXOFOG2Pixels);
+    const TEXOFOG1 = assertExists(context.TEXOFOG1Pixels);
 
     const pixels = new Uint8Array(64 * 64 * 4);
     for (let i = 0; i < 64 * 64; ++i) {
@@ -392,11 +421,6 @@ export function buildTEXOFOGC(device: GfxDevice): Texture {
         pixels[i * 4 + 2] = TEXOFOG1[i * 4];
         pixels[i * 4 + 3] = 0xff;
     }
-
-    // Done with these, let GC get em
-    TEXOFOG4Pixels = null;
-    TEXOFOG2Pixels = null;
-    TEXOFOG1Pixels = null;
 
     const gfxTexture = device.createTexture(
         makeTextureDescriptor2D(GfxFormat.U8_RGBA_NORM, 64, 64, 1));
@@ -414,9 +438,9 @@ export function buildTEXOFOGC(device: GfxDevice): Texture {
 
 // For optimal drawing of multipass cube, pack alpha values of TEXOBLPR,TEXOBLP
 // into one texture. See Render/MultipassCube.ts for implementation.
-export function buildTEXOBLPC(device: GfxDevice): Texture {
-    const TEXOBLPR = assertExists(TEXOBLPRPixels);
-    const TEXOBLP = assertExists(TEXOBLPPixels);
+export function buildTEXOBLPC(device: GfxDevice, context: TextureLoadContext): Texture {
+    const TEXOBLPR = assertExists(context.TEXOBLPRPixels);
+    const TEXOBLP = assertExists(context.TEXOBLPPixels);
 
     const pixels = new Uint8Array(64 * 64 * 4);
     for (let i = 0; i < 64 * 64; ++i) {
@@ -426,15 +450,40 @@ export function buildTEXOBLPC(device: GfxDevice): Texture {
         pixels[i * 4 + 3] = 0xff;
     }
 
-    // Done with these, let GC get em
-    TEXOBLPRPixels = null;
-    TEXOBLPPixels = null;
-
     const gfxTexture = device.createTexture(
         makeTextureDescriptor2D(GfxFormat.U8_RGBA_NORM, 64, 64, 1));
 
     device.uploadTextureData(gfxTexture, 0, [pixels]);
     device.setResourceName(gfxTexture, ResourceID[ResourceID.TEXOBLPC]);
+
+    const extraInfo = new Map<string, string>();
+    extraInfo.set("Format", OsdSysPixelStorageFormat[OsdSysPixelStorageFormat.PSMCT32]);
+    return {
+        gfxTexture,
+        extraInfo
+    };
+}
+
+// For optimal drawing of clock crystal, pack values of TEXCBUMP,TEXCBINV,TEXCFLOW
+// into one texture. See Render/ClockCrystal.ts for implementation.
+export function buildTEXCCRYS(device: GfxDevice, context: TextureLoadContext): Texture {
+    const TEXCBUMP = assertExists(context.TEXCBUMPPixels);
+    const TEXCBINV = assertExists(context.TEXCBINVPixels);
+    const TEXCFLOW = assertExists(context.TEXCFLOWPixels);
+
+    const pixels = new Uint8Array(64 * 64 * 4);
+    for (let i = 0; i < 64 * 64; ++i) {
+        pixels[i * 4] = TEXCBUMP[i * 4];
+        pixels[i * 4 + 1] = TEXCBINV[i * 4];
+        pixels[i * 4 + 2] = TEXCFLOW[i * 4];
+        pixels[i * 4 + 3] = 0xff;
+    }
+
+    const gfxTexture = device.createTexture(
+        makeTextureDescriptor2D(GfxFormat.U8_RGBA_NORM, 64, 64, 1));
+
+    device.uploadTextureData(gfxTexture, 0, [pixels]);
+    device.setResourceName(gfxTexture, ResourceID[ResourceID.TEXCCRYS]);
 
     const extraInfo = new Map<string, string>();
     extraInfo.set("Format", OsdSysPixelStorageFormat[OsdSysPixelStorageFormat.PSMCT32]);

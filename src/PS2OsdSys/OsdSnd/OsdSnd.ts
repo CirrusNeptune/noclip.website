@@ -3,6 +3,7 @@ import ArrayBufferSlice from "../../ArrayBufferSlice";
 import {assert, assertExists, nArray} from "../../util";
 import {clamp} from "../../MathHelpers";
 import { IS_DEVELOPMENT } from "../../BuildVersion.js";
+import {SceneAudioContext} from "../../viewer";
 
 interface HDTone {
     noteMin: number;
@@ -368,8 +369,8 @@ export default class OsdSnd extends SPU2 {
     private voiceStates: VoiceState[] = nArray(OsdSnd.MAX_VOICES, makeVoiceState);
     private numActiveVoices = 0;
 
-    public constructor() {
-        super();
+    public constructor(audioContext: SceneAudioContext) {
+        super(audioContext);
     }
 
     public precacheSamples(hd: HD) {

@@ -46,6 +46,11 @@ export interface ViewerRenderInput {
     debugConsole: DebugConsole;
 }
 
+export interface SceneAudioContext {
+    audioContext: AudioContext;
+    mainGainNode: GainNode;
+}
+
 export interface SceneGfx {
     textureHolder?: UI.TextureListHolder;
     createPanels?(): UI.Panel[];
@@ -54,6 +59,7 @@ export interface SceneGfx {
     getDefaultWorldMatrix?(dst: mat4): void;
     serializeSaveState?(dst: ArrayBuffer, offs: number): number;
     deserializeSaveState?(src: ArrayBufferSlice): void;
+    receiveAudioContext?(audioContext: SceneAudioContext): void;
     onstatechanged?: () => void;
     render(device: GfxDevice, renderInput: ViewerRenderInput): void;
     destroy(device: GfxDevice): void;

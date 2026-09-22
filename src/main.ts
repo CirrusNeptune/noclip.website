@@ -1,7 +1,6 @@
-
 /* @preserve The source code to this website is under the MIT license and can be found at https://github.com/magcius/noclip.website */
 
-import { Viewer, SceneGfx, InitErrorCode, makeErrorUI, resizeCanvas, ViewerUpdateInfo, initializeViewerWebGL2, initializeViewerWebGPU } from './viewer.js';
+import { Viewer, SceneGfx, InitErrorCode, makeErrorUI, resizeCanvas, ViewerUpdateInfo, initializeViewerWebGL2, initializeViewerWebGPU, SceneAudioContext } from './viewer.js';
 
 import * as Scenes_Example from './Example/Scenes.js';
 import * as Scenes_BanjoKazooie from './BanjoKazooie/scenes.js';
@@ -133,7 +132,7 @@ import { RenderStatistics } from './RenderStatistics.js';
 import { Color } from './Color.js';
 import { standardFullClearRenderPassDescriptor } from './gfx/helpers/RenderGraphHelpers.js';
 
-import { SceneDesc, SceneGroup, SceneContext, Destroyable } from './SceneBase.js';
+import { SceneDesc, SceneGroup, SceneContext, Destroyable, SceneAudioDesc } from './SceneBase.js';
 import { prepareFrameDebugOverlayCanvas2D } from './DebugJunk.js';
 import { downloadBlob } from './DownloadUtils.js';
 import { DataShare } from './DataShare.js';
@@ -411,10 +410,15 @@ class Main {
 
     public sceneTimeScale = 1.0;
     private isPlaying = false;
+    private isUserPlaying = false;
     private isFrameStep = false;
 
     public isEmbedMode = false;
     private pixelSize = 1;
+
+    private audioDesc: SceneAudioDesc | null = null;
+    private audioContext: SceneAudioContext | null = null;
+    private audioContextClosePromise: Promise<void> | null = null;
 
     // Link to debugJunk so we can reference it from the DevTools.
     private debugJunk = debugJunk;
@@ -585,7 +589,17 @@ class Main {
         this._reloadCurrentSceneDesc(sceneSaveState);
     }
 
+    private initialPlayAllowed(): boolean {
+        return this.audioDesc === null || this.audioContext !== null || !this.audioDesc.initiallyPausedIfNotUserActivated;
+    }
+
+    private setIsPlayingInitially(v: boolean): void {
+        this.setIsPlaying(v && this.initialPlayAllowed());
+        this.isUserPlaying = v;
+    }
+
     private setIsPlaying(v: boolean): void {
+        this.isUserPlaying = v;
         if (this.isPlaying === v)
             return;
 
@@ -594,6 +608,9 @@ class Main {
 
         if (IS_DEVELOPMENT)
             this._saveCurrentTimeState(this._getCurrentSceneDescId()!);
+
+        if (this.isPlaying)
+            this.tryToStartAudioContext();
     }
 
     private _decodeHashString(hashString: string): [string, SaveState | null] {
@@ -793,7 +810,7 @@ class Main {
     }
 
     private _applyTimeState(timeState: TimeState): void {
-        this.setIsPlaying(timeState.isPlaying);
+        this.setIsPlayingInitially(timeState.isPlaying);
         this.sceneTimeScale = timeState.sceneTimeScale;
         this.viewer.sceneTime = timeState.sceneTime;
     }
@@ -809,7 +826,7 @@ class Main {
     }
 
     private _saveCurrentTimeState(sceneDescId: string): void {
-        const timeState: TimeState = { isPlaying: this.isPlaying, sceneTimeScale: this.sceneTimeScale, sceneTime: this.viewer.sceneTime };
+        const timeState: TimeState = { isPlaying: this.isUserPlaying, sceneTimeScale: this.sceneTimeScale, sceneTime: this.viewer.sceneTime };
         const timeStateStr = JSON.stringify(timeState);
         const timeStateKey = `TimeState/${sceneDescId}`;
         this.saveManager.saveTemporaryState(timeStateKey, timeStateStr);
@@ -898,13 +915,20 @@ class Main {
             this._saveStateAndUpdateURL();
         };
 
+        if (this.audioContext !== null && scene.receiveAudioContext) {
+            console.log("[ac] initial received")
+            scene.receiveAudioContext(this.audioContext);
+        } else {
+            console.log("[ac] initial not received")
+        }
+
         let scenePanels: Panel[] = [];
         if (scene.createPanels)
             scenePanels = scene.createPanels();
         this.ui.setScenePanels(scenePanels);
 
         // Force time to play when loading a map.
-        this.setIsPlaying(true);
+        this.setIsPlayingInitially(true);
 
         const sceneDescId = this._getCurrentSceneDescId()!;
         this.saveManager.setCurrentSceneDescId(sceneDescId);
@@ -982,7 +1006,134 @@ class Main {
             this.destroyablePool[i].destroy(device);
         this.destroyablePool.length = 0;
 
+        this.destroyAudioContext();
+
         this.ui.sceneChanged();
+    }
+
+    private static makeAudioContext(): AudioContext {
+        return new AudioContext({ latencyHint: "interactive" });
+    }
+
+    private volume: number = 0.7;
+    private mute: boolean = false;
+
+    private updateVolume() {
+        if (this.audioContext !== null) {
+            this.audioContext.mainGainNode.gain.value = this.mute ? 0 : this.volume;
+        }
+    }
+
+    private applyAudioContext(audioContext: AudioContext) {
+        this.audioContext = {
+            audioContext,
+            mainGainNode: audioContext.createGain()
+        }
+        this.audioContext.mainGainNode.connect(this.audioContext.audioContext.destination);
+
+        this.ui.muteButton.onmuteunmute = (mute: boolean) => {
+            this.mute = mute;
+            this.updateVolume();
+        };
+        this.ui.muteButton.setMute(this.mute);
+        this.ui.muteButton.setVisible(true);
+
+        this.ui.volumeSlider.onchanged = (vol: number) => {
+            this.volume = vol;
+            this.updateVolume();
+        };
+        this.ui.volumeSlider.setVolume(this.volume);
+        this.ui.volumeSlider.setVisible(true);
+    }
+
+    private destroyAudioContext() {
+        this.audioDesc = null;
+        if (this.audioContext !== null) {
+            this.audioContextClosePromise = this.audioContext.audioContext.close();
+            this.audioContext = null;
+        }
+
+        this.ui.muteButton.onmuteunmute = null;
+        this.ui.muteButton.setVisible(false);
+
+        this.ui.volumeSlider.onchanged = null;
+        this.ui.volumeSlider.setVisible(false);
+    }
+
+    public async tryToStartAudioContext(): Promise<boolean> {
+        if (this.scene === null || this.audioDesc === null || this.audioContext !== null) {
+            return false;
+        }
+
+        await this.openAudioContextIfNeeded(this.audioDesc);
+
+        if (this.audioContext !== null) {
+            if (this.scene.receiveAudioContext)
+                this.scene.receiveAudioContext(this.audioContext);
+            return true;
+        }
+
+        return false;
+    }
+
+    private openAudioContextIfNeeded(audioDesc: SceneAudioDesc | null): Promise<void> {
+        // If there is an outstanding close promise, wait on it so only one AudioContext exists.
+        let audioContextClosePromise: Promise<void>;
+        if (this.audioContextClosePromise !== null) {
+            audioContextClosePromise = this.audioContextClosePromise;
+            this.audioContextClosePromise = null;
+        } else {
+            audioContextClosePromise = Promise.resolve();
+        }
+
+        if (audioDesc) {
+            // Incoming scene requires an AudioContext.
+            // Attempt to proactively create one in "running" state if user's autoplay policy permits.
+            const audioContextOpen = () => {
+                return new Promise<void>((resolve) => {
+                    const audioContext = Main.makeAudioContext();
+
+                    const doResolve = (success: boolean) => {
+                        // Apply AudioContext if we started successfully otherwise close it.
+                        if (success)
+                            this.applyAudioContext(audioContext);
+                        else
+                            this.audioContextClosePromise = audioContext.close();
+                        resolve();
+                    };
+
+                    // In a perfect world, this will actually happen.
+                    if (audioContext.state === "running") {
+                        doResolve(true);
+                        return;
+                    }
+
+                    // On recent Firefox versions we can use https://w3c.github.io/autoplay/
+                    // to avoid the timeout-based not-allowed detection.
+                    if ((navigator as any).getAutoplayPolicy &&
+                        (navigator as any).getAutoplayPolicy(audioContext) !== "allowed") {
+                        doResolve(false);
+                        return;
+                    }
+
+                    // Other browsers require us to listen for onstatechange with a non-trivial
+                    // timeout as the not-allowed detection mechanism :/
+                    const timeoutId = setTimeout(() => {
+                        doResolve(false);
+                    }, 300);
+                    audioContext.onstatechange = () => {
+                        audioContext.onstatechange = null;
+                        clearTimeout(timeoutId);
+                        doResolve(audioContext.state === "running");
+                    };
+                });
+            };
+            return audioContextClosePromise.then(audioContextOpen, audioContextOpen);
+        } else {
+            // Incoming scene does not require an AudioContext.
+            // Just wait for the outstanding close.
+            return audioContextClosePromise;
+        }
     }
 
     private _loadSceneDesc(sceneDesc: SceneDesc, saveState: SaveState | null = null, force: boolean = false): void {
@@ -1038,14 +1189,19 @@ class Main {
         window.dispatchEvent(new Event('loadNewScene'));
 
         this.loadingSceneDesc = sceneDesc;
-        const promise = sceneDesc.createScene(device, context);
+        const scenePromise = sceneDesc.createScene(device, context);
 
-        if (promise === null) {
+        if (scenePromise === null) {
             console.error(`Cannot load ${sceneDesc.id}. Probably an unsupported file extension.`);
             throw new Error("whoops");
         }
 
-        promise.then((scene: SceneGfx) => {
+        // Finish closing outstanding AudioContext and attempt to start a new one if the scene wants one.
+        // Gobble any exceptions so this doesn't prevent the scenePromise from going through.
+        this.audioDesc = sceneDesc.audio ? sceneDesc.audio : null;
+        const audioContextPromise = this.openAudioContextIfNeeded(this.audioDesc).catch(() => {});
+
+        Promise.all([scenePromise, audioContextPromise]).then(([scene, _]: [SceneGfx, void]) => {
             if (this.loadingSceneDesc === sceneDesc) {
                 dataFetcher.setProgress();
                 this.loadingSceneDesc = null;
