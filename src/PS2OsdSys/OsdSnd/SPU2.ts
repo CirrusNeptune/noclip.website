@@ -2,6 +2,7 @@ import BaseDSP from "./BaseDSP";
 import { assert, assertExists, nArray } from "../../util";
 import { IS_DEVELOPMENT } from "../../BuildVersion";
 import {SceneAudioContext} from "../../viewer";
+import {lerp} from "../../MathHelpers";
 
 /**
  * volMode === SPU_VOICE_DIRECT: [-0x4000,0x3fff]
@@ -184,19 +185,103 @@ function makeADSRRegisters(): ADSRRegisters {
 }
 
 /**
+ * [Internal] Type of gain automation event shadow record.
+ *
+ * See findGainValueAtTime for application information.
+ */
+enum GainEventType {
+    LinearRampToValueAtTime,
+    SetTargetAtTime,
+    SetValueAtTime,
+}
+
+/**
+ * [Internal] Shadow record of gain automation event.
+ *
+ * See findGainValueAtTime for application information.
+ */
+interface GainEvent {
+    type: GainEventType,
+    value: number,
+    targetValue: number, // For SetTargetAtTime
+    time: number, // Time at which `value` is prevalent
+    timeConstant: number, // For SetTargetAtTime
+}
+
+/**
+ * [Internal] Inserts a gain automation event into the list while maintaining time sort.
+ *
+ * See findGainValueAtTime for application information.
+ */
+function insertGainEvent(gainEvents: GainEvent[], event: GainEvent): void {
+    if (gainEvents.length === 0) {
+        gainEvents.push(event);
+    } else {
+        let endIdx = 0;
+        for (; endIdx < gainEvents.length && gainEvents[endIdx].time <= event.time; ++endIdx) {}
+        gainEvents.splice(endIdx, 0, event);
+        if (endIdx > 0 && event.type === GainEventType.LinearRampToValueAtTime &&
+            gainEvents[endIdx - 1].type === GainEventType.SetTargetAtTime) {
+            // Convert SetTarget to SetValue according to spec:
+            // > If the preceding event is a SetTarget event, 𝑇0 and 𝑉0 are chosen
+            // > from the current time and value of SetTarget automation. That is,
+            // > if the SetTarget event has not started, 𝑇0 is the start time of
+            // > the event, and 𝑉0 is the value just before the SetTarget event starts.
+            // > In this case, the LinearRampToValue event effectively replaces the
+            // > SetTarget event.
+            gainEvents[endIdx - 1].type = GainEventType.SetValueAtTime;
+        }
+    }
+}
+
+/**
+ * [Internal] Evaluates gain value based on a record of automation events.
+ * Returns the computed value, event index proceeding the query time, and true if to cancel with linear ramp.
+ *
+ * Useful for:
+ * - Initialing envelope state for the Release phase.
+ * - Implementing an alternative to cancelAndHoldAtTime for Firefox.
+ */
+function findGainValueAtTime(gainEvents: GainEvent[], time: number): [number, number, boolean] {
+    if (gainEvents.length === 0)
+        return [0, -1, false];
+    let endIdx = 0;
+    for (; endIdx < gainEvents.length && gainEvents[endIdx].time <= time; ++endIdx) {}
+    if (endIdx === 0)
+        return [0, 0, false];
+    if (gainEvents[endIdx - 1].type === GainEventType.SetTargetAtTime) {
+        const setTarget = gainEvents[endIdx - 1];
+        const value = setTarget.targetValue + (setTarget.value - setTarget.targetValue) *
+            Math.exp(-((time - setTarget.time) / setTarget.timeConstant));
+        return [value, endIdx === gainEvents.length ? -1 : endIdx, false];
+    }
+    if (endIdx < gainEvents.length && gainEvents[endIdx].type === GainEventType.LinearRampToValueAtTime) {
+        const linearRamp = gainEvents[endIdx];
+        const startTime = gainEvents[endIdx - 1].time;
+        const value = lerp(gainEvents[endIdx - 1].value,
+            linearRamp.value, (time - startTime) / (linearRamp.time - startTime));
+        return [value, endIdx, true];
+    }
+    const value = gainEvents[endIdx - 1].value;
+    return [value, endIdx === gainEvents.length ? -1 : endIdx, false];
+}
+
+/**
  * [Internal] Structure to hold AudioNode references and register values for
  * deferred key-on.
  */
 interface SPUVoice {
     index: number;
     sourceNode: AudioBufferSourceNode | null;
-    adsrGainNode: GainNode;
+    adsrGainNode: GainNode | null;
+    keyOnGainEvents: GainEvent[];
     leftGainNode: GainNode;
     rightGainNode: GainNode;
     channelMergerNode: ChannelMergerNode;
     addr: SampleBufferAndOffset | null;
     pitch: number;
     adsr: ADSRRegisters;
+    keyOn: boolean;
 }
 
 /**
@@ -256,15 +341,10 @@ export abstract class SPU2 extends BaseDSP {
     }
 
     private constructVoice(index: number): SPUVoice {
-        const adsrGainNode = this.audioContext.audioContext.createGain();
-        adsrGainNode.gain.value = 0;
         const leftGainNode = this.audioContext.audioContext.createGain();
         leftGainNode.gain.value = 1;
         const rightGainNode = this.audioContext.audioContext.createGain();
         rightGainNode.gain.value = 1;
-
-        adsrGainNode.connect(leftGainNode);
-        adsrGainNode.connect(rightGainNode);
 
         const channelMergerNode = this.audioContext.audioContext.createChannelMerger(2);
         leftGainNode.connect(channelMergerNode, 0, 0);
@@ -274,13 +354,15 @@ export abstract class SPU2 extends BaseDSP {
         return {
             index,
             sourceNode: null,
-            adsrGainNode,
+            adsrGainNode: null,
+            keyOnGainEvents: [],
             leftGainNode,
             rightGainNode,
             channelMergerNode,
             addr: null,
             pitch: 1.0,
-            adsr: makeADSRRegisters()
+            adsr: makeADSRRegisters(),
+            keyOn: false,
         };
     }
 
@@ -423,14 +505,30 @@ export abstract class SPU2 extends BaseDSP {
         return source;
     }
 
-    private static _scheduleRampTo(baseTime: number, gainNode: GainNode, state: EnvelopeState, target: number, rate: number, rateMask: number, direction: RateDirection, mode: RateMode, phaseInvert: boolean) {
-        if (state.complete) {
+    private static _scheduleRampTo(baseTime: number, gainNode: GainNode, gainEvents: GainEvent[] | null, state: EnvelopeState, target: number, rate: number, rateMask: number, direction: RateDirection, mode: RateMode, phaseInvert: boolean) {
+        if (state.complete)
             return;
-        }
         if (state.needsCancel) {
             SPU2.debugVoice(state.voice, `  [ADSR][CancelAndHold]`);
-            gainNode.gain.cancelAndHoldAtTime(baseTime + state.sample / SPU2.VOICE_SAMPLE_RATE);
+            assert(gainEvents !== null);
+            const time = baseTime + state.sample / SPU2.VOICE_SAMPLE_RATE;
+            const [value, cancelIdx, cancelWithRamp] = findGainValueAtTime(gainEvents, time);
+            if (cancelWithRamp)
+                gainNode.gain.linearRampToValueAtTime(value, time);
+            else
+                gainNode.gain.setValueAtTime(value, time);
+            if (cancelIdx !== -1) {
+                gainNode.gain.cancelScheduledValues(gainEvents[cancelIdx].time);
+                gainEvents.length = cancelIdx;
+            }
             state.needsCancel = false;
+            insertGainEvent(gainEvents, {
+                type: GainEventType.SetValueAtTime,
+                value,
+                targetValue: value,
+                time,
+                timeConstant: 0
+            });
         }
 
         // References:
@@ -464,10 +562,20 @@ export abstract class SPU2 extends BaseDSP {
             // hardware (sans quantization errors).
             const stepAdj = thisStep * thisIncrement / 0x8000;
             const targetSample = (thisTarget - state.level) / stepAdj + state.sample;
-            gainNode.gain.linearRampToValueAtTime(thisTarget / 0x7fff, baseTime + targetSample / SPU2.VOICE_SAMPLE_RATE);
+            const value = thisTarget / 0x7fff;
+            const time = baseTime + targetSample / SPU2.VOICE_SAMPLE_RATE;
+            gainNode.gain.linearRampToValueAtTime(value, time);
             state.sample = targetSample;
             state.level = thisTarget;
             SPU2.debugVoice(state.voice, `  [ADSR]  Linear (${state.sample},${state.level})`);
+            if (gainEvents !== null)
+                insertGainEvent(gainEvents, {
+                    type: GainEventType.LinearRampToValueAtTime,
+                    value,
+                    targetValue: value,
+                    time,
+                    timeConstant: 0
+                });
         }
 
         function exponentialDecayRamp() {
@@ -486,17 +594,27 @@ export abstract class SPU2 extends BaseDSP {
             //
             // Web Audio was never going to be sample-accurate anyway.
             const delta = state.level - target;
-            if (delta === 0) {
+            if (delta === 0)
                 return;
-            }
             const stepAdj = step * counterIncrement / 0x8000;
             const approximateSampleCount = (-180000 / stepAdj * delta / 0x7fff) >>> 0;
             const timeConstant = approximateSampleCount / 5.2 / SPU2.VOICE_SAMPLE_RATE;
-            gainNode.gain.setTargetAtTime(target / 0x7fff, baseTime + state.sample / SPU2.VOICE_SAMPLE_RATE, timeConstant);
+            const value = state.level / 0x7fff;
+            const targetValue = target / 0x7fff;
+            const time = baseTime + state.sample / SPU2.VOICE_SAMPLE_RATE;
+            gainNode.gain.setTargetAtTime(targetValue, time, timeConstant);
             state.sample += approximateSampleCount;
             state.level = target;
             state.needsCancel = true;
             SPU2.debugVoice(state.voice, `  [ADSR]  Exponential ${timeConstant} (${state.sample},${state.level})`);
+            if (gainEvents !== null)
+                insertGainEvent(gainEvents, {
+                    type: GainEventType.SetTargetAtTime,
+                    value,
+                    targetValue,
+                    time,
+                    timeConstant
+                });
         }
 
         if (mode === RateMode.Exponential) {
@@ -537,12 +655,17 @@ export abstract class SPU2 extends BaseDSP {
             needsCancel: false
         };
 
-        SPU2.debugVoice(voice, `  [ADSR][CancelAndHold+SetValue0]`);
-        voice.adsrGainNode.gain.cancelAndHoldAtTime(time);
-        voice.adsrGainNode.gain.setValueAtTime(0, time);
+        voice.keyOnGainEvents.length = 0;
+        insertGainEvent(voice.keyOnGainEvents, {
+            type: GainEventType.SetValueAtTime,
+            value: 0,
+            targetValue: 0,
+            time,
+            timeConstant: 0
+        });
 
         SPU2.debugVoice(voice, `  [ADSR][Attack]`);
-        SPU2._scheduleRampTo(time, voice.adsrGainNode, state, 0x7fff, adsr.ar & 0x7f, 0x7f, RateDirection.Increasing, adsr.ar_m, false);
+        SPU2._scheduleRampTo(time, voice.adsrGainNode!, voice.keyOnGainEvents, state, 0x7fff, adsr.ar & 0x7f, 0x7f, RateDirection.Increasing, adsr.ar_m, false);
         if (state.complete) {
             assert(state.sample !== 0, `Key-on for voice ${voice.index} didn't seem to schedule anything`);
             return;
@@ -550,7 +673,7 @@ export abstract class SPU2 extends BaseDSP {
 
         SPU2.debugVoice(voice, `  [ADSR][Decay]`);
         const decayTarget = Math.min((adsr.sl + 1) * 0x800, 0x7fff);
-        SPU2._scheduleRampTo(time, voice.adsrGainNode, state, decayTarget, (adsr.dr & 0xf) << 2, 0x1f << 2, RateDirection.Decreasing, RateMode.Exponential, false);
+        SPU2._scheduleRampTo(time, voice.adsrGainNode!, voice.keyOnGainEvents, state, decayTarget, (adsr.dr & 0xf) << 2, 0x1f << 2, RateDirection.Decreasing, RateMode.Exponential, false);
         if (state.complete) {
             assert(state.sample !== 0, `Key-on for voice ${voice.index} didn't seem to schedule anything`);
             return;
@@ -558,7 +681,7 @@ export abstract class SPU2 extends BaseDSP {
 
         SPU2.debugVoice(voice, `  [ADSR][Sustain]`);
         const sustainTarget = adsr.sr_s === RateDirection.Increasing ? 0x7fff : 0x0;
-        SPU2._scheduleRampTo(time, voice.adsrGainNode, state, sustainTarget, adsr.sr & 0x7f, 0x7f, adsr.sr_s, adsr.sr_m, false);
+        SPU2._scheduleRampTo(time, voice.adsrGainNode!, voice.keyOnGainEvents, state, sustainTarget, adsr.sr & 0x7f, 0x7f, adsr.sr_s, adsr.sr_m, false);
 
         assert(state.sample !== 0, `Key-on for voice ${voice.index} didn't seem to schedule anything`);
     }
@@ -566,22 +689,26 @@ export abstract class SPU2 extends BaseDSP {
     private static _scheduleKeyOffADSR(time: number, voice: SPUVoice) {
         const adsr = voice.adsr;
 
-        // TODO: Calculate accurate current level by replaying key-on and solving the matching ramp piece (if it exists)
-        let estimatedLevel = Math.min((adsr.sl + 1) * 0x800, 0x7fff);
+        const [level, cancelIdx, cancelWithRamp] = findGainValueAtTime(voice.keyOnGainEvents, time);
 
         const state: EnvelopeState = {
             voice,
             sample: 0,
-            level: estimatedLevel,
+            level: (level * 0x7fff) >>> 0,
             complete: false,
             needsCancel: false
         };
 
         SPU2.debugVoice(voice, `  [ADSR][CancelAndHold]`);
-        voice.adsrGainNode.gain.cancelAndHoldAtTime(time);
+        if (cancelWithRamp)
+            voice.adsrGainNode!.gain.linearRampToValueAtTime(level, time);
+        else
+            voice.adsrGainNode!.gain.setValueAtTime(level, time);
+        if (cancelIdx !== -1)
+            voice.adsrGainNode!.gain.cancelScheduledValues(voice.keyOnGainEvents[cancelIdx].time);
 
         SPU2.debugVoice(voice, `  [ADSR][Release]`);
-        SPU2._scheduleRampTo(time, voice.adsrGainNode, state, 0, (adsr.rr & 0x1f) << 2, 0x1f << 2, RateDirection.Decreasing, adsr.rr_m, false);
+        SPU2._scheduleRampTo(time, voice.adsrGainNode!, null, state, 0, (adsr.rr & 0x1f) << 2, 0x1f << 2, RateDirection.Decreasing, adsr.rr_m, false);
 
         assert(state.sample !== 0, `Key-off for voice ${voice.index} didn't seem to schedule anything`);
     }
@@ -632,12 +759,18 @@ export abstract class SPU2 extends BaseDSP {
     }
 
     private _setVoiceKeyOn(time: number, voice: SPUVoice) {
-        if (voice.sourceNode !== null) {
+        if (voice.keyOn)
+            return;
+        voice.keyOn = true;
+        if (voice.sourceNode !== null)
             voice.sourceNode.stop(time);
-        }
         const addr = assertExists(voice.addr)
         voice.sourceNode = this.makeAudioBufferSource(addr);
         voice.sourceNode.playbackRate.value = voice.pitch;
+        voice.adsrGainNode = this.audioContext.audioContext.createGain();
+        voice.adsrGainNode.gain.value = 0;
+        voice.adsrGainNode.connect(voice.leftGainNode);
+        voice.adsrGainNode.connect(voice.rightGainNode);
         voice.sourceNode.connect(voice.adsrGainNode);
         SPU2._scheduleKeyOnADSR(time, voice);
         voice.sourceNode.start(time);
@@ -667,6 +800,9 @@ export abstract class SPU2 extends BaseDSP {
     }
 
     private static _setVoiceKeyOff(time: number, voice: SPUVoice) {
+        if (!voice.keyOn)
+            return;
+        voice.keyOn = false;
         this._scheduleKeyOffADSR(time, voice);
     }
 

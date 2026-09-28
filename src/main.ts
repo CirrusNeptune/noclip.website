@@ -915,12 +915,8 @@ class Main {
             this._saveStateAndUpdateURL();
         };
 
-        if (this.audioContext !== null && scene.receiveAudioContext) {
-            console.log("[ac] initial received")
+        if (this.audioContext !== null && scene.receiveAudioContext)
             scene.receiveAudioContext(this.audioContext);
-        } else {
-            console.log("[ac] initial not received")
-        }
 
         let scenePanels: Panel[] = [];
         if (scene.createPanels)
@@ -1025,10 +1021,13 @@ class Main {
     }
 
     private applyAudioContext(audioContext: AudioContext) {
+        if (this.audioContext !== null)
+            this.audioContext.audioContext.close();
+
         this.audioContext = {
             audioContext,
             mainGainNode: audioContext.createGain()
-        }
+        };
         this.audioContext.mainGainNode.connect(this.audioContext.audioContext.destination);
 
         this.ui.muteButton.onmuteunmute = (mute: boolean) => {
@@ -1065,7 +1064,7 @@ class Main {
             return false;
         }
 
-        await this.openAudioContextIfNeeded(this.audioDesc);
+        await this.closeAndOpenAudioContextIfNeeded(this.audioDesc);
 
         if (this.audioContext !== null) {
             if (this.scene.receiveAudioContext)
@@ -1076,7 +1075,7 @@ class Main {
         return false;
     }
 
-    private openAudioContextIfNeeded(audioDesc: SceneAudioDesc | null): Promise<void> {
+    private closeAndOpenAudioContextIfNeeded(audioDesc: SceneAudioDesc | null): Promise<void> {
         // If there is an outstanding close promise, wait on it so only one AudioContext exists.
         let audioContextClosePromise: Promise<void>;
         if (this.audioContextClosePromise !== null) {
@@ -1088,7 +1087,19 @@ class Main {
 
         if (audioDesc) {
             // Incoming scene requires an AudioContext.
+            //
             // Attempt to proactively create one in "running" state if user's autoplay policy permits.
+            //
+            // From https://webaudio.github.io/web-audio-api/#AudioContext:
+            // > An AudioContext is said to be allowed to start if the user agent allows the context
+            // > state to transition from "suspended" to "running". A user agent may disallow this
+            // > initial transition, and to allow it only when the AudioContext’s relevant global
+            // > object has sticky activation.
+            //
+            // However, sticky activation is not the only deciding factor. Users may have explicitly
+            // allowed (or denied) autoplay through the browser's per-domain settings. This method
+            // uses a brief timeout and onstatechange to empirically detect the effective autoplay
+            // condition.
             const audioContextOpen = () => {
                 return new Promise<void>((resolve) => {
                     const audioContext = Main.makeAudioContext();
@@ -1199,7 +1210,7 @@ class Main {
         // Finish closing outstanding AudioContext and attempt to start a new one if the scene wants one.
         // Gobble any exceptions so this doesn't prevent the scenePromise from going through.
         this.audioDesc = sceneDesc.audio ? sceneDesc.audio : null;
-        const audioContextPromise = this.openAudioContextIfNeeded(this.audioDesc).catch(() => {});
+        const audioContextPromise = this.closeAndOpenAudioContextIfNeeded(this.audioDesc).catch(() => {});
 
         Promise.all([scenePromise, audioContextPromise]).then(([scene, _]: [SceneGfx, void]) => {
             if (this.loadingSceneDesc === sceneDesc) {
