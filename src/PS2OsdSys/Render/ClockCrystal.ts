@@ -13,7 +13,7 @@ import {
     GfxVertexBufferFrequency
 } from "../../gfx/platform/GfxPlatform";
 import {GfxFormat} from "../../gfx/platform/GfxPlatformFormat";
-import {mat4, vec3} from "gl-matrix";
+import {mat4, vec3, vec4} from "gl-matrix";
 import {fillMatrix4x3, fillVec3v, fillVec4} from "../../gfx/helpers/UniformBufferHelpers";
 import IBIOSScene from "../IBIOSScene";
 import {BIOSROM} from "../BIOSROM";
@@ -38,7 +38,7 @@ layout(location = ${ClockCrystalProgram.a_Normal}) in vec3 a_Normal;
 layout(location = ${ClockCrystalProgram.a_TexCoord}) in vec2 a_TexCoord;
 layout(location = ${ClockCrystalProgram.a_QuadIdx}) in float a_QuadIdx;
 
-out vec3 v_AddColor;
+out vec3 v_RefractiveColor;
 out vec2 v_TexCoordSub;
 out vec2 v_TexCoordAdd;
 out vec2 v_ViewNormal2D;
@@ -66,13 +66,13 @@ void main() {
     vec3 t_CenterViewNorm = normalize(t_CenterView);
     float t_CameraNormalDot = abs(dot(t_CenterViewNorm, t_NormalView));
     t_CameraNormalDot = 1.0 - t_CameraNormalDot;
-    float t_ViewDotScale = u_AddColor_ViewDotScale.a;
+    float t_ViewDotScale = u_RefractiveColor_ViewDotScale.a;
     v_CameraNormalDotHighlight = t_ViewDotScale * 10.0 * t_CameraNormalDot * t_CameraNormalDot * t_CameraNormalDot * t_CameraNormalDot;
     if (t_CameraNormalDot > 0.9)
         v_CameraNormalDotHighlight *= (1.0 - cos((1.0 - t_CameraNormalDot) * PI * 10.0)) * 0.5;
     v_CameraNormalDotHighlight /= 128.0;
 
-    v_AddColor = u_AddColor_ViewDotScale.rgb;
+    v_RefractiveColor = u_RefractiveColor_ViewDotScale.rgb;
 
     float TexScrollStep = u_Magnification_Refraction_TexScrollStep.z;
     v_TexCoordSub = a_TexCoord + vec2((TexScrollStep + a_QuadIdx) / 10.0);
@@ -83,7 +83,7 @@ void main() {
     public override frag = `
 ${ClockCrystalProgram.Common}
 
-in vec3 v_AddColor;
+in vec3 v_RefractiveColor;
 in vec2 v_TexCoordSub;
 in vec2 v_TexCoordAdd;
 in vec2 v_ViewNormal2D;
@@ -107,6 +107,7 @@ void main() {
     vec2 ScreenCoord = clamp(MagnificationOffset - RefractOffset, vec2(0.0), vec2(SceneSize - ivec2(1)));
     vec2 SampleCenter = (ScreenCoord + 0.5) / vec2(SceneSize);
     vec3 SceneColor = texture(SAMPLER_2D(u_SceneTexture), SampleCenter).rgb;
+    SceneColor *= vec3(v_CameraNormalDotHighlight) + v_RefractiveColor;
 
     float BumpSampleSub = texture(SAMPLER_2D(u_Texture), v_TexCoordSub).r;
     float BumpSampleAdd = texture(SAMPLER_2D(u_Texture), v_TexCoordAdd).r;
@@ -126,7 +127,7 @@ ${BaseProgram.BaseCommon}
 
 layout(std140) uniform ub_ClockCrystalParams {
     Mat3x4 u_WorldFromLocal;
-    vec4 u_AddColor_ViewDotScale;
+    vec4 u_RefractiveColor_ViewDotScale;
     vec4 u_Magnification_Refraction_TexScrollStep;
     vec4 u_TexAddScrollXY;
     vec4 u_BumpRGB;
@@ -429,6 +430,8 @@ export default class ClockCrystalGeometry {
                 instList: GfxRenderInstList,
                 frontface: boolean,
                 objMatrix: mat4,
+                refractiveRGBA: vec4,
+                refraction: number,
                 bumpRGB: vec3){
         const renderInst = biosScene.renderHelper.renderInstManager.newRenderInst();
         renderInst.setBindingLayouts([
@@ -456,10 +459,10 @@ export default class ClockCrystalGeometry {
         let offs = 0;
         offs += fillMatrix4x3(clockCrystalParams, offs, objMatrix);
 
-        offs += fillVec4(clockCrystalParams, offs, 0.25, 0.25, 0.25, 10.0);
+        const viewDotScale = 10.0;
+        offs += fillVec4(clockCrystalParams, offs, refractiveRGBA[0] / 128, refractiveRGBA[1] / 128, refractiveRGBA[2] / 128, viewDotScale);
 
         const magnification = 0.95;
-        const refraction = 1;
         offs += fillVec4(clockCrystalParams, offs, magnification, refraction, 0, 0);
 
         const texScrollAddX = 0.5;

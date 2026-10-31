@@ -583,7 +583,7 @@ export default class OsdSnd extends SPU2 {
             pitch = OsdSnd.PITCH_LUT[lutIndex] << ((noteDelta / 12) >>> 0);
         }
 
-        // A hack present in the original osdsnd to handle SPU2's migration to 48kHz.
+        // A hack present in the original OSDSND to handle SPU2's migration to 48kHz.
         // Ostensibly the original samples were authored for 44.1kHz playback (ala PS1 SPU),
         // this globally slows them down to compensate.
         return ((pitch * 44100 / 48000) >>> 0) & 0xffff;

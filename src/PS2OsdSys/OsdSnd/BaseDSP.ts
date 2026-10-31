@@ -1,5 +1,4 @@
 import {assertExists} from "../../util";
-import ArrayBufferSlice from "../../ArrayBufferSlice";
 import {SceneAudioContext} from "../../viewer";
 
 /**
@@ -10,8 +9,6 @@ import {SceneAudioContext} from "../../viewer";
  * events in the future (at least 100ms by default). The derived class'
  * schedule() is invoked on this latency cadence to keep up with the
  * AudioContext.
- *
- * BaseDSP also provides an interface to fetch voice states for the UI.
  */
 export default abstract class BaseDSP {
     private lastScheduledTo: number | null = null;

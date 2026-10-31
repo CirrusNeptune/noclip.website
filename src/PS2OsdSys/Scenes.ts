@@ -129,7 +129,7 @@ class BIOSScene implements SceneGfx, IBIOSScene {
         uniqueHDs.forEach((hd) => this.osdSnd!.precacheSamples(hd));
 
         // Give audio context some time to start
-        setTimeout(() => this.osdSnd!.startSeq(assertExists(this.sequenceStates.get(ResourceID.SNDBOOTS))), 200);
+        setTimeout(() => this.osdSnd!.startSeq(assertExists(this.sequenceStates.get(ResourceID.SNDCLOKS))), 200);
     }
 
     private freeCam: boolean = false;
@@ -215,7 +215,8 @@ class BIOSScene implements SceneGfx, IBIOSScene {
         this.activeModule.draw({
             builder,
             mainColorTargetID,
-            mainDepthTargetID
+            mainDepthTargetID,
+            viewerInput
         });
 
         this.renderHelper.renderInstManager.popTemplate();

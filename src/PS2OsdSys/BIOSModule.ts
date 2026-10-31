@@ -3,6 +3,7 @@ import {assert, assertExists} from "../util";
 import {clamp} from "../MathHelpers";
 import IBIOSScene from "./IBIOSScene";
 import {GfxrGraphBuilder, GfxrRenderTargetID} from "../gfx/render/GfxRenderGraph";
+import {ViewerRenderInput} from "../viewer";
 
 const STABLE_TICK_RATE = 1.0 / 60.0;
 
@@ -10,6 +11,7 @@ export interface DrawParams {
     builder: GfxrGraphBuilder,
     mainColorTargetID: GfxrRenderTargetID,
     mainDepthTargetID: GfxrRenderTargetID,
+    viewerInput: ViewerRenderInput,
 }
 
 export interface StableStateOps<StableStateType> {

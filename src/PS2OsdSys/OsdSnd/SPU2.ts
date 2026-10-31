@@ -44,7 +44,7 @@ export interface SpuVolumeRateMode {
 }
 
 /**
- * Sound buffer pointer alternative which permits sharing the buffer
+ * Sound buffer pointer alternative which enables sharing the buffer
  * asset reference and using it as a DecodedBuffer cache key.
  */
 export interface SampleBufferAndOffset {
@@ -54,7 +54,7 @@ export interface SampleBufferAndOffset {
 
 /**
  * "High-level" voice attribute register structure.
- * Supports partial register writes, retaining the prior value of undefined attrs.
+ * Supports partial register writes, retaining the prior value of undefined attributes.
  */
 export interface SpuVoiceAttr {
     /**
@@ -76,7 +76,7 @@ export interface SpuVoiceAttr {
 
     /**
      * The current volume output level.
-     * Writable in the original hardware, but the SPU library in osdsnd does not
+     * Writable in the original hardware, but the SPU library in OSDSND does not
      * permit actually setting it. This has little utility since it gets clobbered
      * by the hardware volume sweep generator. Kept for posterity.
      */
@@ -99,7 +99,7 @@ export interface SpuVoiceAttr {
 
     /**
      * The current envelope (ADSR) output level.
-     * Writable in the original hardware, but the SPU library in osdsnd does not
+     * Writable in the original hardware, but the SPU library in OSDSND does not
      * permit actually setting it. This has little utility since it gets clobbered
      * by the hardware envelope generator. Kept for posterity.
      */
@@ -239,7 +239,7 @@ function insertGainEvent(gainEvents: GainEvent[], event: GainEvent): void {
  * Returns the computed value, event index proceeding the query time, and true if to cancel with linear ramp.
  *
  * Useful for:
- * - Initialing envelope state for the Release phase.
+ * - Initializing envelope state for the Release phase.
  * - Implementing an alternative to cancelAndHoldAtTime for Firefox.
  */
 function findGainValueAtTime(gainEvents: GainEvent[], time: number): [number, number, boolean] {
@@ -523,7 +523,7 @@ export abstract class SPU2 extends BaseDSP {
             }
             state.needsCancel = false;
             insertGainEvent(gainEvents, {
-                type: GainEventType.SetValueAtTime,
+                type: cancelWithRamp ? GainEventType.LinearRampToValueAtTime : GainEventType.SetValueAtTime,
                 value,
                 targetValue: value,
                 time,
@@ -547,7 +547,7 @@ export abstract class SPU2 extends BaseDSP {
             step <<= 11 - (rate >> 2);
         } else if (rate >= 48) {
             counterIncrement >>= (rate >> 2) - 11;
-            if ((rate & rateMask) != rateMask) {
+            if ((rate & rateMask) !== rateMask) {
                 counterIncrement = Math.max(counterIncrement, 1);
             } else {
                 // All bits set => locked in as constant level, no further automations to schedule.
@@ -622,8 +622,7 @@ export abstract class SPU2 extends BaseDSP {
                 exponentialDecayRamp();
             } else {
                 // Exponential increasing on the other hand is super easy.
-                // It's a two-part piecewise-linear function around y === 0x6000,
-                // shallowing above this threshold.
+                // It's a two-part piecewise-linear function around y === 0x6000.
                 if (state.level < 0x6000) {
                     if (target <= 0x6000) {
                         linearRamp(counterIncrement, step, target);
