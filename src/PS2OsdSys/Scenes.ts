@@ -33,6 +33,8 @@ import ArrayBufferSlice from "../ArrayBufferSlice";
 import ClockBGGeometry from "./Render/ClockBG";
 import {ClockModule} from "./Clock";
 import ClockCrystalGeometry from "./Render/ClockCrystal";
+import FullscreenBlitGeometry from "./Render/FullscreenBlit";
+import ClockOrbSpriteGeometry from "./Render/ClockOrbSprite";
 
 export const noclipSpaceFromOsdSysSpace = mat4.fromValues(
     -1, 0,  0, 0,
@@ -57,6 +59,8 @@ class BIOSScene implements SceneGfx, IBIOSScene {
     public multipassCubeGeometry: MultipassCubeGeometry;
     public clockBGGeometry: ClockBGGeometry;
     public clockCrystalGeometry: ClockCrystalGeometry;
+    public clockOrbSpriteGeometry: ClockOrbSpriteGeometry;
+    public fullscreenBlitGeometry: FullscreenBlitGeometry;
 
     public textureHolder = new FakeTextureHolder([]);
 
@@ -89,6 +93,8 @@ class BIOSScene implements SceneGfx, IBIOSScene {
         this.multipassCubeGeometry = new MultipassCubeGeometry(cache, this.biosROM);
         this.clockBGGeometry = new ClockBGGeometry(cache, this.biosROM);
         this.clockCrystalGeometry = new ClockCrystalGeometry(cache, this.biosROM);
+        this.clockOrbSpriteGeometry = new ClockOrbSpriteGeometry(cache, this.biosROM);
+        this.fullscreenBlitGeometry = new FullscreenBlitGeometry(cache);
 
         this.linearSampler = cache.createSampler({
             minFilter: GfxTexFilterMode.Bilinear,
@@ -248,6 +254,8 @@ class BIOSScene implements SceneGfx, IBIOSScene {
         this.multipassCubeGeometry.destroy(device);
         this.clockBGGeometry.destroy(device);
         this.clockCrystalGeometry.destroy(device);
+        this.clockOrbSpriteGeometry.destroy(device);
+        this.fullscreenBlitGeometry.destroy(device);
 
         this.biosROM.destroy(device);
 

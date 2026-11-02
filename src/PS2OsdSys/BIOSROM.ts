@@ -2,7 +2,7 @@ import ArrayBufferSlice from "../ArrayBufferSlice";
 import {assertExists} from "../util";
 import { HD, parseHD, SQ, parseSQ } from "./OsdSnd/OsdSnd";
 import {
-    buildTEXCCRYS,
+    buildTEXCCRYS, buildTEXCORB,
     buildTEXOBLPC,
     buildTEXOFOGC,
     loadTexture,
@@ -173,6 +173,9 @@ export class BIOSROM {
 
         // Combine TEXCBUMP,TEXCBINV,TEXCFLOW into channel-packed texture.
         this.textures.set(ResourceID.TEXCCRYS, buildTEXCCRYS(device, loadContext));
+
+        // Combine TEXCBLUR,TEXCNAVI into channel-packed texture.
+        this.textures.set(ResourceID.TEXCORB, buildTEXCORB(device, loadContext));
     }
 
     public destroy(device: GfxDevice) {

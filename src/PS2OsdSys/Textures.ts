@@ -317,6 +317,10 @@ export interface TextureLoadContext {
     TEXCBUMPPixels: Uint8Array | null;
     TEXCBINVPixels: Uint8Array | null;
     TEXCFLOWPixels: Uint8Array | null;
+
+    // Keep the raw pixels of these around to build TEXCORB.
+    TEXCBLURPixels: Uint8Array | null;
+    TEXCNAVIPixels: Uint8Array | null;
 }
 
 export function makeTextureLoadContext(): TextureLoadContext {
@@ -329,6 +333,8 @@ export function makeTextureLoadContext(): TextureLoadContext {
         TEXCBUMPPixels: null,
         TEXCBINVPixels: null,
         TEXCFLOWPixels: null,
+        TEXCBLURPixels: null,
+        TEXCNAVIPixels: null,
     };
 }
 
@@ -392,6 +398,10 @@ export function loadTexture(id: ResourceID, data: ArrayBufferSlice, device: GfxD
         context.TEXCBINVPixels = pixels;
     else if (id === ResourceID.TEXCFLOW)
         context.TEXCFLOWPixels = pixels;
+    else if (id === ResourceID.TEXCBLUR)
+        context.TEXCBLURPixels = pixels;
+    else if (id === ResourceID.TEXCNAVI)
+        context.TEXCNAVIPixels = pixels;
 
     const gfxTexture = device.createTexture(
         makeTextureDescriptor2D(GfxFormat.U8_RGBA_NORM, info.width, info.height, 1));
@@ -484,6 +494,34 @@ export function buildTEXCCRYS(device: GfxDevice, context: TextureLoadContext): T
 
     device.uploadTextureData(gfxTexture, 0, [pixels]);
     device.setResourceName(gfxTexture, ResourceID[ResourceID.TEXCCRYS]);
+
+    const extraInfo = new Map<string, string>();
+    extraInfo.set("Format", OsdSysPixelStorageFormat[OsdSysPixelStorageFormat.PSMCT32]);
+    return {
+        gfxTexture,
+        extraInfo
+    };
+}
+
+// For optimal drawing of clock orb sprites, pack values of TEXCBLUR,TEXCNAVI
+// into one texture. See Render/ClockOrbSprite.ts for implementation.
+export function buildTEXCORB(device: GfxDevice, context: TextureLoadContext): Texture {
+    const TEXCBLUR = assertExists(context.TEXCBLURPixels);
+    const TEXCNAVI = assertExists(context.TEXCNAVIPixels);
+
+    const pixels = new Uint8Array(64 * 64 * 4);
+    for (let i = 0; i < 64 * 64; ++i) {
+        pixels[i * 4] = TEXCBLUR[i * 4 + 3];
+        pixels[i * 4 + 1] = TEXCNAVI[i * 4 + 3];
+        pixels[i * 4 + 2] = 0;
+        pixels[i * 4 + 3] = 0xff;
+    }
+
+    const gfxTexture = device.createTexture(
+        makeTextureDescriptor2D(GfxFormat.U8_RGBA_NORM, 64, 64, 1));
+
+    device.uploadTextureData(gfxTexture, 0, [pixels]);
+    device.setResourceName(gfxTexture, ResourceID[ResourceID.TEXCORB]);
 
     const extraInfo = new Map<string, string>();
     extraInfo.set("Format", OsdSysPixelStorageFormat[OsdSysPixelStorageFormat.PSMCT32]);

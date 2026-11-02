@@ -5,6 +5,11 @@ import {mat4, ReadonlyMat4, ReadonlyVec2, ReadonlyVec3, vec2, vec3, vec4} from "
 import {GfxRenderInstList} from "../gfx/render/GfxRenderInstManager";
 import {assert, nArray} from "../util";
 import {GfxrAttachmentSlot} from "../gfx/render/GfxRenderGraph";
+import {
+    makeBackbufferDescSimple,
+    opaqueBlackFullClearRenderPassDescriptor,
+    standardFullClearRenderPassDescriptor
+} from "../gfx/helpers/RenderGraphHelpers";
 
 const scratchVec: vec3 = vec3.create();
 const scratchMtx: mat4 = mat4.create();
@@ -69,6 +74,12 @@ interface StableState {
     activeHourIdx: number;
     minuteRotationUint16: number;
     topHourBaseRotationUint16: number;
+    twelveHourProgressUint16: number;
+    hourProgressUint16: number;
+    minuteProgressUint16: number;
+    minuteProgressUnfilteredUint16: number;
+    orbLocalY: number;
+    orbAlphaLerp: number;
 }
 
 const STABLE_STATE_OPS: StableStateOps<StableState> = {
@@ -83,6 +94,12 @@ const STABLE_STATE_OPS: StableStateOps<StableState> = {
             activeHourIdx: 0,
             minuteRotationUint16: 0,
             topHourBaseRotationUint16: 0,
+            twelveHourProgressUint16: 0,
+            hourProgressUint16: 0,
+            minuteProgressUint16: 0,
+            minuteProgressUnfilteredUint16: 0,
+            orbLocalY: 0,
+            orbAlphaLerp: 0,
         };
     },
 
@@ -97,6 +114,12 @@ const STABLE_STATE_OPS: StableStateOps<StableState> = {
         to.activeHourIdx = from.activeHourIdx;
         to.minuteRotationUint16 = from.minuteRotationUint16;
         to.topHourBaseRotationUint16 = from.topHourBaseRotationUint16;
+        to.twelveHourProgressUint16 = from.twelveHourProgressUint16;
+        to.hourProgressUint16 = from.hourProgressUint16;
+        to.minuteProgressUint16 = from.minuteProgressUint16;
+        to.minuteProgressUnfilteredUint16 = from.minuteProgressUnfilteredUint16;
+        to.orbLocalY = from.orbLocalY;
+        to.orbAlphaLerp = from.orbAlphaLerp;
     },
 
     interpolateStableState: (out: StableState, a: StableState, b: StableState, alpha: number) => {
@@ -109,7 +132,13 @@ const STABLE_STATE_OPS: StableStateOps<StableState> = {
         vec4.lerp(out.mainCrystalReflectionRGBA, a.mainCrystalReflectionRGBA, b.mainCrystalReflectionRGBA, alpha);
         out.activeHourIdx = a.activeHourIdx;
         out.minuteRotationUint16 = cyclicUInt16Lerp(a.minuteRotationUint16, b.minuteRotationUint16, alpha);
-        out.topHourBaseRotationUint16 = cyclicUInt16Lerp(a.topHourBaseRotationUint16, b.topHourBaseRotationUint16, alpha);
+        out.topHourBaseRotationUint16 = a.topHourBaseRotationUint16;
+        out.twelveHourProgressUint16 = cyclicUInt16Lerp(a.twelveHourProgressUint16, b.twelveHourProgressUint16, alpha);
+        out.hourProgressUint16 = cyclicUInt16Lerp(a.hourProgressUint16, b.hourProgressUint16, alpha);
+        out.minuteProgressUint16 = cyclicUInt16Lerp(a.minuteProgressUint16, b.minuteProgressUint16, alpha);
+        out.minuteProgressUnfilteredUint16 = cyclicUInt16Lerp(a.minuteProgressUnfilteredUint16, b.minuteProgressUnfilteredUint16, alpha);
+        out.orbLocalY = lerp(a.orbLocalY, b.orbLocalY, alpha);
+        out.orbAlphaLerp = lerp(a.orbAlphaLerp, b.orbAlphaLerp, alpha);
     }
 };
 
@@ -138,6 +167,11 @@ class LerpController {
     public lerpValue(value: number): number {
         assert(this.durationTicks !== 0);
         return this.currentTicks * value / this.durationTicks >> 0;
+    }
+
+    public getFloatValue(): number {
+        assert(this.durationTicks !== 0);
+        return this.currentTicks / this.durationTicks;
     }
 
     public isInState(state: LerpState): boolean {
@@ -225,37 +259,19 @@ const MAIN_REFRACTION_COLOR_TABLE: vec4[] = [
 
 interface BaseRenderBlock {
     texScrollStep: number;
-    //numQuads: number;
-    //posPerVertRef: ReadonlyVec3[];
-    //normPerQuadRef: ReadonlyVec3[];
-    //stPerVertRef: ReadonlyVec2[];
     objMtx: mat4;
-    //projMtxRef: ReadonlyMat4;
-    //camMtxRef: ReadonlyMat4;
 }
 
 function makeBaseRenderBlock(): BaseRenderBlock {
     return {
         texScrollStep: 0,
-        //numQuads: 0,
-        //posPerVertRef: [],
-        //normPerQuadRef: [],
-        //stPerVertRef: [],
         objMtx: mat4.create(),
-        //projMtxRef: Mat4Identity,
-        //camMtxRef: Mat4Identity,
     };
 }
 
 function copyBaseRenderBlock(to: BaseRenderBlock, from: BaseRenderBlock) {
     to.texScrollStep = from.texScrollStep;
-    //to.numQuads = from.numQuads;
-    //to.posPerVertRef = from.posPerVertRef;
-    //to.normPerQuadRef = from.normPerQuadRef;
-    //to.stPerVertRef = from.stPerVertRef;
     mat4.copy(to.objMtx, from.objMtx);
-    //to.projMtxRef = from.projMtxRef;
-    //to.camMtxRef = from.camMtxRef;
 }
 
 interface CrystalRenderBlock extends BaseRenderBlock {
@@ -298,30 +314,40 @@ function copyCrystalRenderBlock(to: CrystalRenderBlock, from: CrystalRenderBlock
 abstract class BaseRenderObject {
     protected zOffset: number = 0;
     public getZOffset(): number { return this.zOffset; }
+
+    protected setZOffset(objMtx: mat4, viewMtx: mat4) {
+        vec3.transformMat4(scratchVec, Vec3Zero, objMtx);
+        scratchVec[0] = -scratchVec[0];
+        vec3.transformMat4(scratchVec, scratchVec, viewMtx);
+        this.zOffset = scratchVec[2];
+    }
 }
 
 class OrbRenderObject extends BaseRenderObject {
     block: BaseRenderBlock = makeBaseRenderBlock();
     orbIdx: number = -1;
+
+    public setOrb(template: BaseRenderBlock, viewMatrix: mat4, orbIdx: number) {
+        this.setZOffset(template.objMtx, viewMatrix);
+        copyBaseRenderBlock(this.block, template);
+        this.orbIdx = orbIdx;
+    }
 }
 
 class CrystalRenderObject extends BaseRenderObject {
     block: CrystalRenderBlock = makeCrystalRenderBlock();
     scaleInterp: number = 0;
-    refractionRgba: vec4 = vec4.create();
-    viewDotScale: number = 0;
+    boostRefractionRgba: vec4 = vec4.create();
+    boostViewDotScale: number = 0;
     reflectionRgba: vec4 = vec4.create();
 
     public setCrystal(scaleInterp: number, template: CrystalRenderBlock, viewMatrix: mat4,
-                      refractionRgba: vec4, viewDotScale: number, reflectionRgba: vec4) {
-        vec3.transformMat4(scratchVec, Vec3Zero, template.objMtx);
-        scratchVec[0] = -scratchVec[0];
-        vec3.transformMat4(scratchVec, scratchVec, viewMatrix);
-        this.zOffset = scratchVec[2];
+                      boostRefractionRgba: vec4, boostViewDotScale: number, reflectionRgba: vec4) {
+        this.setZOffset(template.objMtx, viewMatrix);
         copyCrystalRenderBlock(this.block, template);
-        this.viewDotScale = viewDotScale;
+        this.boostViewDotScale = boostViewDotScale;
         this.scaleInterp = scaleInterp;
-        vec4.copy(this.refractionRgba, refractionRgba);
+        vec4.copy(this.boostRefractionRgba, boostRefractionRgba);
         vec4.copy(this.reflectionRgba, reflectionRgba);
     }
 }
@@ -329,23 +355,38 @@ class CrystalRenderObject extends BaseRenderObject {
 const CRYSTAL_Y_TRANSLATE: vec3 = [0, 20, 0];
 
 export class ClockModule extends BIOSModule<StableState> {
-    private instLists: GfxRenderInstList[] = [];
-    private curInstListIdx: number = -1;
+    private refractInstLists: GfxRenderInstList[] = [];
+    private curRefractInstListIdx: number = -1;
+    private reflectInstLists: GfxRenderInstList[] = [];
+    private curReflectInstListIdx: number = -1;
 
     private resetInstLists() {
-        this.curInstListIdx = -1;
+        this.curRefractInstListIdx = -1;
+        this.curReflectInstListIdx = -1;
     }
 
-    private startInstList(): GfxRenderInstList {
-        this.curInstListIdx += 1;
-        if (this.instLists[this.curInstListIdx] === undefined)
-            this.instLists[this.curInstListIdx] = new GfxRenderInstList();
-        this.instLists[this.curInstListIdx].reset();
-        return this.instLists[this.curInstListIdx];
+    private startRefractInstList(): GfxRenderInstList {
+        this.curRefractInstListIdx += 1;
+        if (this.refractInstLists[this.curRefractInstListIdx] === undefined)
+            this.refractInstLists[this.curRefractInstListIdx] = new GfxRenderInstList();
+        this.refractInstLists[this.curRefractInstListIdx].reset();
+        return this.refractInstLists[this.curRefractInstListIdx];
     }
 
-    private getCurInstList(): GfxRenderInstList {
-        return this.instLists[this.curInstListIdx];
+    private getCurRefractInstList(): GfxRenderInstList {
+        return this.refractInstLists[this.curRefractInstListIdx];
+    }
+
+    private startReflectInstList(): GfxRenderInstList {
+        this.curReflectInstListIdx += 1;
+        if (this.reflectInstLists[this.curReflectInstListIdx] === undefined)
+            this.reflectInstLists[this.curReflectInstListIdx] = new GfxRenderInstList();
+        this.reflectInstLists[this.curReflectInstListIdx].reset();
+        return this.reflectInstLists[this.curReflectInstListIdx];
+    }
+
+    private getCurReflectInstList(): GfxRenderInstList {
+        return this.reflectInstLists[this.curReflectInstListIdx];
     }
 
     private frameCounter: number = 0;
@@ -368,7 +409,7 @@ export class ClockModule extends BIOSModule<StableState> {
     }
 
     private drawBG() {
-        this.biosScene.clockBGGeometry.draw(this.biosScene, this.getCurInstList(),
+        this.biosScene.clockBGGeometry.draw(this.biosScene, this.getCurRefractInstList(),
             this.drawStableState.bgColorBias, this.drawStableState.bgScrollAnim);
     }
 
@@ -443,15 +484,20 @@ export class ClockModule extends BIOSModule<StableState> {
         return this.currentHours + this.getCurrentMinutesFloat() / 60.0;
     }
 
-    private minuteProgressUint16: number = 0;
-    private twelveHourProgressUint16: number = 0;
+    private orbLocalYScale: number = 0;
+    private targetOrbLocalYScale: number = 1;
+    private tickDisplayModeInterp() {
+        this.orbLocalYScale += (this.targetOrbLocalYScale - this.orbLocalYScale) * 0.1;
+    }
+
     private remainingHourFraction: number = 0;
     private remainingHourFraction_2: number = 0;
+    private hourProgressFraction: number = 0;
     private tickClockProgressValues() {
         this.tickStableState.activeHourIdx = (this.getCurrentHoursFloat() >>> 0) % NUM_CRYSTALS;
 
         const topHourBaseRotationTarget = ((this.tickStableState.activeHourIdx << 16) / NUM_CRYSTALS) >>> 0;
-        if (Math.abs(this.tickStableState.minuteRotationUint16) <= 200)
+        if (Math.abs(this.tickStableState.minuteRotationUint16 << 16 >> 16) <= 200)
             this.tickStableState.topHourBaseRotationUint16 = topHourBaseRotationTarget;
         else
             this.tickStableState.topHourBaseRotationUint16 = cyclicUInt16LPF(this.tickStableState.topHourBaseRotationUint16, topHourBaseRotationTarget, 0.1);
@@ -460,21 +506,35 @@ export class ClockModule extends BIOSModule<StableState> {
         this.tickStableState.minuteRotationUint16 = cyclicUInt16LPF(this.tickStableState.minuteRotationUint16, minuteRotationTarget, 0.1);
 
         const twelveHourProgressTarget = (this.getCurrentHoursFloat() * 65536.0 / 12.0) >>> 0;
-        this.twelveHourProgressUint16 += ((twelveHourProgressTarget - this.twelveHourProgressUint16) * 0.1) >> 0;
+        this.tickStableState.twelveHourProgressUint16 += ((twelveHourProgressTarget - this.tickStableState.twelveHourProgressUint16) * 0.1) >> 0;
 
         const minuteProgressTarget = (this.getCurrentSecondsFloat() * 65536.0 / 60.0) >>> 0;
-        this.minuteProgressUint16 = cyclicUInt16LPF(this.minuteProgressUint16, minuteProgressTarget, 0.1);
+        this.tickStableState.minuteProgressUint16 = cyclicUInt16LPF(this.tickStableState.minuteProgressUint16, minuteProgressTarget, 0.1);
 
         this.remainingHourFraction = 1.0 - this.getCurrentMinutesFloat() / 60.0;
         this.remainingHourFraction_2 = this.remainingHourFraction;
+
+        this.tickStableState.hourProgressUint16 = this.getCurrentMinutesFloat() * 65536.0 / 60.0;
+        this.tickStableState.minuteProgressUnfilteredUint16 = minuteProgressTarget;
+
+        this.tickStableState.orbLocalY = (this.hourProgressFraction * 7.25 + 10.0) * this.orbLocalYScale;
+        this.hourProgressFraction = ((1 - this.remainingHourFraction_2) - this.hourProgressFraction) * 0.005;
     }
 
     private initClockProgressValues() {
         this.tickStableState.activeHourIdx = (this.getCurrentHoursFloat() >>> 0) % NUM_CRYSTALS;
-        this.twelveHourProgressUint16 = (this.getCurrentHoursFloat() * 65536.0 / 12.0) >>> 0;
-        this.minuteProgressUint16 = (this.getCurrentSecondsFloat() * 65536.0 / 60.0) >>> 0;
+        this.tickStableState.twelveHourProgressUint16 = (this.getCurrentHoursFloat() * 65536.0 / 12.0) >>> 0;
+        this.tickStableState.minuteProgressUint16 = (this.getCurrentSecondsFloat() * 65536.0 / 60.0) >>> 0;
         this.tickStableState.topHourBaseRotationUint16 = ((this.tickStableState.activeHourIdx << 16) / NUM_CRYSTALS) >>> 0;
         this.tickStableState.minuteRotationUint16 = (this.getCurrentSecondsFloat() * 65536.0 / 60.0) >>> 0;
+
+        this.tickStableState.hourProgressUint16 = this.getCurrentMinutesFloat() * 65536.0 / 60.0;
+        this.tickStableState.minuteProgressUnfilteredUint16 = this.tickStableState.minuteProgressUint16;
+
+        this.remainingHourFraction = 1.0 - this.getCurrentMinutesFloat() / 60.0;
+        this.remainingHourFraction_2 = this.remainingHourFraction;
+        this.hourProgressFraction = ((1 - this.remainingHourFraction_2) - this.hourProgressFraction) * 0.005;
+        this.tickStableState.orbLocalY = (this.hourProgressFraction * 7.25 + 10.0) * this.orbLocalYScale;
     }
 
     private tickClockProgressInternal() {
@@ -482,8 +542,12 @@ export class ClockModule extends BIOSModule<StableState> {
         this.tickClockCrystalColors();
     }
 
+    private orbAlphaLerp: LerpController = new LerpController(256);
     private crystalLengthScaleLerp: LerpController = new LerpController(1);
     private tickClockProgress() {
+        this.orbAlphaLerp.tick();
+        this.tickStableState.orbAlphaLerp = this.orbAlphaLerp.getFloatValue();
+
         this.crystalLengthScaleLerp.tick();
         this.tickClockProgressInternal();
         for (let i = 0; i < NUM_CRYSTALS; ++i) {
@@ -497,6 +561,14 @@ export class ClockModule extends BIOSModule<StableState> {
                 crystalState.crystalFillInterp = 0;
             }
             crystalState.crystalLengthScale = this.crystalLengthScaleLerp.lerpValue(128) / 128;
+        }
+    }
+
+    private initOrbAlphaLerp() {
+        this.orbAlphaLerp.reset();
+        this.orbAlphaLerp.conditionallyStartIncreasing();
+        while (this.orbAlphaLerp.isInState(LerpState.DoneIncreasing)) {
+            this.orbAlphaLerp.tick();
         }
     }
 
@@ -515,6 +587,7 @@ export class ClockModule extends BIOSModule<StableState> {
                 vec4.set(this.tickStableState.crystalStates[i].refractionRGBA, 0x80, 0x80, 0x80, 0x80);
             }
         }
+        this.initOrbAlphaLerp();
     }
 
     private conditionallyStartCrystalGrow() {
@@ -552,13 +625,7 @@ export class ClockModule extends BIOSModule<StableState> {
 
     private crystalRenderBlockTemplate: CrystalRenderBlock = {
         texScrollStep: 0,
-        //numQuads: 0,
-        //posPerVertRef: [],
-        //normPerQuadRef: [],
-        //stPerVertRef: [],
         objMtx: mat4.create(),
-        //projMtxRef: Mat4Identity,
-        //camMtxRef: Mat4Identity,
         objScale: vec3.fromValues(1, 1, 1),
         refractionRGBA: vec4.fromValues(0, 0, 0, 128),
         viewDotScale: 128,
@@ -582,7 +649,7 @@ export class ClockModule extends BIOSModule<StableState> {
             mat4.rotateZ(this.crystalRenderBlockTemplate.objMtx, this.crystalRenderBlockTemplate.objMtx,
                 this.drawStableState.topHourBaseRotationUint16 * -MathConstants.TAU / 0x10000);
             mat4.rotateY(this.crystalRenderBlockTemplate.objMtx, this.crystalRenderBlockTemplate.objMtx,
-                this.drawStableState.minuteRotationUint16 * -MathConstants.TAU / 0x10000);
+                this.drawStableState.minuteRotationUint16 * MathConstants.TAU / 0x10000);
             mat4.rotateZ(this.crystalRenderBlockTemplate.objMtx, this.crystalRenderBlockTemplate.objMtx,
                 i * -MathConstants.TAU / NUM_CRYSTALS);
             mat4.translate(this.crystalRenderBlockTemplate.objMtx, this.crystalRenderBlockTemplate.objMtx, CRYSTAL_Y_TRANSLATE);
@@ -605,13 +672,33 @@ export class ClockModule extends BIOSModule<StableState> {
         }
     }
 
-    private updateRenderOrbs() {
+    private orbRenderBlockTemplate: BaseRenderBlock = {
+        texScrollStep: 0,
+        objMtx: mat4.create()
+    };
 
+    private updateRenderOrbs(viewMatrix: mat4) {
+        for (let i = 0; i < NUM_ORBS; ++i) {
+            mat4.identity(this.orbRenderBlockTemplate.objMtx);
+            mat4.rotateZ(this.orbRenderBlockTemplate.objMtx, this.orbRenderBlockTemplate.objMtx,
+                this.drawStableState.twelveHourProgressUint16 * -MathConstants.TAU / 0x10000);
+            mat4.rotateY(this.orbRenderBlockTemplate.objMtx, this.orbRenderBlockTemplate.objMtx,
+                this.drawStableState.minuteProgressUint16 * MathConstants.TAU / 0x10000);
+            mat4.rotateZ(this.orbRenderBlockTemplate.objMtx, this.orbRenderBlockTemplate.objMtx, -Math.PI);
+            mat4.rotateY(this.orbRenderBlockTemplate.objMtx, this.orbRenderBlockTemplate.objMtx,
+                this.drawStableState.hourProgressUint16 * 1100 * MathConstants.TAU / 0x10000);
+            mat4.rotateX(this.orbRenderBlockTemplate.objMtx, this.orbRenderBlockTemplate.objMtx,
+                (i + 21) * this.drawStableState.minuteProgressUnfilteredUint16 * MathConstants.TAU / 0x10000);
+            mat4.translate(this.orbRenderBlockTemplate.objMtx, this.orbRenderBlockTemplate.objMtx, [0, this.drawStableState.orbLocalY, 0]);
+            mat4.rotateY(this.orbRenderBlockTemplate.objMtx, this.orbRenderBlockTemplate.objMtx, -Math.PI / 4);
+
+            this.orbRenderObjects[i].setOrb(this.orbRenderBlockTemplate, viewMatrix, i);
+        }
     }
 
     private updateRenderObjects(viewMatrix: mat4) {
         this.updateRenderCrystals(viewMatrix);
-        this.updateRenderOrbs();
+        this.updateRenderOrbs(viewMatrix);
         this.sortedRenderObjects.sort((a, b) => a.getZOffset() - b.getZOffset());
     }
 
@@ -629,16 +716,29 @@ export class ClockModule extends BIOSModule<StableState> {
     private drawReflectivePass(withCrystals: boolean) {
         if (!withCrystals)
             return;
+
+        this.startReflectInstList();
+
         for (let i = 0; i < this.sortedRenderObjects.length; ++i) {
             const renderObject = this.sortedRenderObjects[i];
             if (renderObject instanceof CrystalRenderObject) {
-                this.drawCrystalReflectivePass(renderObject);
+                this.drawCrystalReflectivePass(renderObject, 0);
+            }
+        }
+
+        this.startReflectInstList();
+
+        for (let i = 0; i < this.sortedRenderObjects.length; ++i) {
+            const renderObject = this.sortedRenderObjects[i];
+            if (renderObject instanceof CrystalRenderObject) {
+                this.drawCrystalReflectivePass(renderObject, 1);
             }
         }
     }
 
     private drawOrb(object: OrbRenderObject) {
-
+        mat4.getTranslation(scratchVec, object.block.objMtx);
+        this.biosScene.clockOrbSpriteGeometry.draw(this.biosScene, this.getCurRefractInstList(), scratchVec, [0x30, 0x62, 0x80, 0x3c])
     }
 
     private topCrystalInnerMtx: mat4 = mat4.create();
@@ -658,20 +758,55 @@ export class ClockModule extends BIOSModule<StableState> {
             scratchVec[1] *= 1 - object.scaleInterp;
             mat4.scale(this.topCrystalOuterMtx, scratchMtx, scratchVec);
 
-            this.biosScene.clockCrystalGeometry.draw(this.biosScene, this.startInstList(), false, this.topCrystalInnerMtx, block.refractionRGBA, block.refraction, [0.5,0.5,0.5]);
-            this.biosScene.clockCrystalGeometry.draw(this.biosScene, this.startInstList(), false, this.topCrystalOuterMtx, block.refractionRGBA, block.refraction, [0.5,0.5,0.5]);
+            this.biosScene.clockCrystalGeometry.drawRefractive(this.biosScene, this.startRefractInstList(), false,
+                this.topCrystalInnerMtx, object.boostRefractionRgba, object.boostViewDotScale,
+                block.refraction, block.texScrollStep, block.stScroll, block.bumpRGBA);
+            this.biosScene.clockCrystalGeometry.drawRefractive(this.biosScene, this.startRefractInstList(), false,
+                this.topCrystalOuterMtx, block.refractionRGBA, block.viewDotScale,
+                block.refraction, block.texScrollStep, block.stScroll, block.bumpRGBA);
 
-            this.biosScene.clockCrystalGeometry.draw(this.biosScene, this.startInstList(), true, this.topCrystalInnerMtx, block.refractionRGBA, block.refraction, [0,0,0]);
-            this.biosScene.clockCrystalGeometry.draw(this.biosScene, this.startInstList(), true, this.topCrystalOuterMtx, block.refractionRGBA, block.refraction, [0,0,0]);
+            this.biosScene.clockCrystalGeometry.drawRefractive(this.biosScene, this.startRefractInstList(), true,
+                this.topCrystalInnerMtx, object.boostRefractionRgba, object.boostViewDotScale,
+                block.refraction, block.texScrollStep, block.stScroll, [0,0,0,0]);
+            this.biosScene.clockCrystalGeometry.drawRefractive(this.biosScene, this.startRefractInstList(), true,
+                this.topCrystalOuterMtx, block.refractionRGBA, block.viewDotScale,
+                block.refraction, block.texScrollStep, block.stScroll, [0,0,0,0]);
         } else {
             mat4.scale(scratchMtx, block.objMtx, block.objScale);
-            this.biosScene.clockCrystalGeometry.draw(this.biosScene, this.startInstList(), false, scratchMtx, block.refractionRGBA, block.refraction, [0.5,0.5,0.5]);
-            this.biosScene.clockCrystalGeometry.draw(this.biosScene, this.startInstList(), true, scratchMtx, block.refractionRGBA, block.refraction, [0,0,0]);
+            this.biosScene.clockCrystalGeometry.drawRefractive(this.biosScene, this.startRefractInstList(), false,
+                scratchMtx, block.refractionRGBA, block.viewDotScale,
+                block.refraction, block.texScrollStep, block.stScroll, block.bumpRGBA);
+            this.biosScene.clockCrystalGeometry.drawRefractive(this.biosScene, this.startRefractInstList(), true,
+                scratchMtx, block.refractionRGBA, block.viewDotScale,
+                block.refraction, block.texScrollStep, block.stScroll, [0,0,0,0]);
         }
     }
 
-    private drawCrystalReflectivePass(object: CrystalRenderObject) {
+    private drawCrystalReflectivePass(object: CrystalRenderObject, bumpDir: number) {
+        const block = object.block;
+        if (block.objScale[1] < 0)
+            return;
 
+        if (object.scaleInterp > 0) {
+            vec3.copy(scratchVec, block.objScale);
+            scratchVec[1] *= object.scaleInterp;
+            mat4.scale(this.topCrystalInnerMtx, block.objMtx, scratchVec);
+
+            mat4.translate(scratchMtx, block.objMtx, [0, block.objScale[1] * 26 * object.scaleInterp, 0]);
+            vec3.copy(scratchVec, block.objScale);
+            scratchVec[1] *= 1 - object.scaleInterp;
+            mat4.scale(this.topCrystalOuterMtx, scratchMtx, scratchVec);
+
+            this.biosScene.clockCrystalGeometry.drawReflective(this.biosScene, this.getCurReflectInstList(),
+                this.topCrystalInnerMtx, block.texScrollStep, block.flowRGBA, block.bumpRGBA, bumpDir, block.stScroll);
+
+            this.biosScene.clockCrystalGeometry.drawReflective(this.biosScene, this.getCurReflectInstList(),
+                this.topCrystalOuterMtx, block.texScrollStep, block.flowRGBA, block.bumpRGBA, bumpDir, block.stScroll);
+        } else {
+            mat4.scale(scratchMtx, block.objMtx, block.objScale);
+            this.biosScene.clockCrystalGeometry.drawReflective(this.biosScene, this.getCurReflectInstList(),
+                scratchMtx, block.texScrollStep, block.flowRGBA, block.bumpRGBA, bumpDir, block.stScroll);
+        }
     }
 
     protected stableTick() {
@@ -680,13 +815,14 @@ export class ClockModule extends BIOSModule<StableState> {
         this.frameCounter += 1;
 
         this.tickClockProgress();
+        this.tickDisplayModeInterp();
         this.tickBG();
         this.updateClockFromLatestRTC();
     }
 
     public draw(params: DrawParams) {
         this.resetInstLists();
-        this.startInstList();
+        this.startRefractInstList();
         this.drawBG();
 
         this.updateRenderObjects(params.viewerInput.camera.viewMatrix);
@@ -700,24 +836,55 @@ export class ClockModule extends BIOSModule<StableState> {
             pass.attachRenderTargetID(GfxrAttachmentSlot.Color0, params.mainColorTargetID);
             pass.attachRenderTargetID(GfxrAttachmentSlot.DepthStencil, params.mainDepthTargetID);
             pass.exec((passRenderer, scope) => {
-                this.instLists[0].drawOnPassRenderer(this.biosScene.renderHelper.renderCache, passRenderer);
+                this.refractInstLists[0].drawOnPassRenderer(this.biosScene.renderHelper.renderCache, passRenderer);
             });
         });
 
-        for (let i = 1; i <= this.curInstListIdx; ++i) {
+        for (let i = 1; i <= this.curRefractInstListIdx; ++i) {
             const sceneColorResolveTextureID = params.builder.resolveRenderTarget(params.mainColorTargetID);
             params.builder.pushPass((pass) => {
-                pass.setDebugName(`Pass ${i}`);
+                pass.setDebugName(`Refract Pass ${i}`);
                 pass.attachResolveTexture(sceneColorResolveTextureID);
                 pass.attachRenderTargetID(GfxrAttachmentSlot.Color0, params.mainColorTargetID);
                 pass.attachRenderTargetID(GfxrAttachmentSlot.DepthStencil, params.mainDepthTargetID);
                 pass.exec((passRenderer, scope) => {
                     const sceneColorTexture = scope.getResolveTextureForID(sceneColorResolveTextureID);
-                    this.instLists[i].resolveLateSamplerBinding("sceneColor", {
+                    this.refractInstLists[i].resolveLateSamplerBinding("sceneColor", {
                         gfxTexture: sceneColorTexture,
                         gfxSampler: this.biosScene.clampSampler
                     });
-                    this.instLists[i].drawOnPassRenderer(this.biosScene.renderHelper.renderCache, passRenderer);
+                    this.refractInstLists[i].drawOnPassRenderer(this.biosScene.renderHelper.renderCache, passRenderer);
+                });
+            });
+        }
+
+        const reflectColorDesc = makeBackbufferDescSimple(GfxrAttachmentSlot.Color0, params.viewerInput, opaqueBlackFullClearRenderPassDescriptor);
+        const reflectDepthDesc = makeBackbufferDescSimple(GfxrAttachmentSlot.DepthStencil, params.viewerInput, standardFullClearRenderPassDescriptor);
+
+        for (let i = 0; i <= this.curReflectInstListIdx; ++i) {
+            const reflectColorTargetID = params.builder.createRenderTargetID(reflectColorDesc, 'Reflect Color');
+            const reflectDepthTargetID = params.builder.createRenderTargetID(reflectDepthDesc, 'Reflect Depth');
+            params.builder.pushPass((pass) => {
+                pass.setDebugName(`Reflect Pass ${i}`);
+                pass.attachRenderTargetID(GfxrAttachmentSlot.Color0, reflectColorTargetID);
+                pass.attachRenderTargetID(GfxrAttachmentSlot.DepthStencil, reflectDepthTargetID);
+                pass.exec((passRenderer, scope) => {
+                    this.reflectInstLists[i].drawOnPassRenderer(this.biosScene.renderHelper.renderCache, passRenderer);
+                });
+            });
+            const reflectColorResolveTextureID = params.builder.resolveRenderTarget(reflectColorTargetID);
+            params.builder.pushPass((pass) => {
+                pass.setDebugName(`Merge Reflect Pass ${i}`);
+                pass.attachResolveTexture(reflectColorResolveTextureID);
+                pass.attachRenderTargetID(GfxrAttachmentSlot.Color0, params.mainColorTargetID);
+                pass.attachRenderTargetID(GfxrAttachmentSlot.DepthStencil, params.mainDepthTargetID);
+                const renderInst = this.biosScene.renderHelper.renderInstManager.newRenderInst();
+                this.biosScene.fullscreenBlitGeometry.draw(this.biosScene, renderInst, [30/128, 30/128, 30/128, 1], true);
+                pass.exec((passRenderer, scope) => {
+                    renderInst.setSamplerBindingsFromTextureMappings([
+                        { gfxTexture: scope.getResolveTextureForID(reflectColorResolveTextureID), gfxSampler: this.biosScene.clampSampler },
+                    ]);
+                    renderInst.drawOnPass(this.biosScene.renderHelper.renderCache, passRenderer);
                 });
             });
         }

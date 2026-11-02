@@ -8,6 +8,8 @@ import MultipassCubeGeometry from "./Render/MultipassCube";
 import {MCHistoryEntry} from "./MCHistory";
 import ClockBGGeometry from "./Render/ClockBG";
 import ClockCrystalGeometry from "./Render/ClockCrystal";
+import FullscreenBlitGeometry from "./Render/FullscreenBlit";
+import ClockOrbSpriteGeometry from "./Render/ClockOrbSprite";
 
 export default interface IBIOSScene {
     renderHelper: GfxRenderHelper;
@@ -21,6 +23,8 @@ export default interface IBIOSScene {
     multipassCubeGeometry: MultipassCubeGeometry;
     clockBGGeometry: ClockBGGeometry;
     clockCrystalGeometry: ClockCrystalGeometry;
+    clockOrbSpriteGeometry: ClockOrbSpriteGeometry;
+    fullscreenBlitGeometry: FullscreenBlitGeometry;
 
     mcHistory: MCHistoryEntry[];
     cameraAspect: number;

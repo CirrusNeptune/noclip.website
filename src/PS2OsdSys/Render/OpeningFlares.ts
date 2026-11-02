@@ -190,7 +190,7 @@ export default class OpeningFlaresGeometry {
         renderInst.setInstanceCount(NUM_FLARES * NUM_FLARE_OVERDRAWS);
 
         const flareParams = renderInst.allocateUniformBufferF32(
-            OpeningFlaresProgram.ub_FlaresParams, 12 * NUM_FLARES * NUM_FLARE_OVERDRAWS + 4 * NUM_FLARES);
+            OpeningFlaresProgram.ub_FlaresParams, 4 * NUM_FLARES * NUM_FLARE_OVERDRAWS + 4 * NUM_FLARES);
 
         let offs = 0;
         for (let i = 0; i < NUM_FLARES * NUM_FLARE_OVERDRAWS; ++i) {
