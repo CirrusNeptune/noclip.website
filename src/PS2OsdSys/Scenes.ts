@@ -77,6 +77,7 @@ class BIOSScene implements SceneGfx, IBIOSScene {
     constructor(private sceneContext: SceneContext, private biosROM: BIOSROM) {
         this.inputManager = sceneContext.inputManager;
         sceneContext.viewerInput.camera.fovY = 0.4604391746;
+        sceneContext.viewerInput.camera.fovY = 0.7813779543;
 
         biosROM.textures.forEach((texture) => {
             this.textureHolder.viewerTextures.push(texture);
@@ -135,7 +136,8 @@ class BIOSScene implements SceneGfx, IBIOSScene {
         uniqueHDs.forEach((hd) => this.osdSnd!.precacheSamples(hd));
 
         // Give audio context some time to start
-        setTimeout(() => this.osdSnd!.startSeq(assertExists(this.sequenceStates.get(ResourceID.SNDCLOKS))), 200);
+        //setTimeout(() => this.osdSnd!.startSeq(assertExists(this.sequenceStates.get(ResourceID.SNDCLOKS))), 200);
+        this.osdSnd!.startSeq(assertExists(this.sequenceStates.get(ResourceID.SNDCLOKS)));
     }
 
     private freeCam: boolean = false;

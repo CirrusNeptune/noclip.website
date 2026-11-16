@@ -9,6 +9,7 @@ export interface RenderStatistics {
 export class RenderStatisticsTracker {
     public frameStartCPUTime: number = 0;
     public frameCPUTime: number = 0;
+    public frameToFrameTime: number = 0;
     public fps: number = 0;
     public lines: string[] = [];
     public gameLines: string[] = [];
@@ -18,7 +19,9 @@ export class RenderStatisticsTracker {
     }
 
     public beginFrame(): void {
-        this.frameStartCPUTime = window.performance.now();
+        const now = window.performance.now();
+        this.frameToFrameTime = now - this.frameStartCPUTime;
+        this.frameStartCPUTime = now;
         this.lines.length = 0;
         this.frameCPUTime = 0;
         this.fps = 0;
@@ -26,7 +29,7 @@ export class RenderStatisticsTracker {
 
     public endFrame(): RenderStatistics {
         this.frameCPUTime = window.performance.now() - this.frameStartCPUTime;
-        this.fps = 1000 / this.frameCPUTime;
+        this.fps = 1000 / this.frameToFrameTime;
         this.lines.push(`CPU Time: ${(this.frameCPUTime).toFixed(2)}ms`);
         this.lines.push(`FPS: ${this.fps | 0}`);
         return this;

@@ -4,12 +4,18 @@ import IBIOSScene from "./IBIOSScene";
 import {mat4, ReadonlyMat4, ReadonlyVec2, ReadonlyVec3, vec2, vec3, vec4} from "gl-matrix";
 import {GfxRenderInstList} from "../gfx/render/GfxRenderInstManager";
 import {assert, nArray} from "../util";
-import {GfxrAttachmentSlot} from "../gfx/render/GfxRenderGraph";
+import {
+    GfxrAttachmentSlot,
+    GfxrGraphBuilder,
+    GfxrRenderTargetID,
+    GfxrResolveTextureID
+} from "../gfx/render/GfxRenderGraph";
 import {
     makeBackbufferDescSimple,
     opaqueBlackFullClearRenderPassDescriptor,
     standardFullClearRenderPassDescriptor
 } from "../gfx/helpers/RenderGraphHelpers";
+import {GfxSampler} from "../gfx/platform/GfxPlatformImpl";
 
 const scratchVec: vec3 = vec3.create();
 const scratchMtx: mat4 = mat4.create();
@@ -26,8 +32,8 @@ function cyclicUInt16Lerp(a: number, b: number, t: number): number {
     if (Math.abs(b - a) <= 0x7fff)
         return lerp(a, b, t);
     if (a < b)
-        return lerp(a + 0xffff, b, t);
-    return lerp(a, b + 0xffff, t);
+        return lerp(a + 0x10000, b, t);
+    return lerp(a, b + 0x10000, t);
 }
 
 interface ClockCrystalStableState {
@@ -354,41 +360,90 @@ class CrystalRenderObject extends BaseRenderObject {
 
 const CRYSTAL_Y_TRANSLATE: vec3 = [0, 20, 0];
 
+interface RenderPassResolveBinding {
+    bindingName: string,
+    id: GfxrResolveTextureID,
+}
+
+/**
+ * Immediate-like render graph abstraction which accumulates render instances and
+ * stages resolves and passes per-render-target.
+ *
+ * The clock renderer uses this to maintain onscreen and offscreen render targets.
+ * Crystal passes need to flexibly attach offscreen -> offscreen or offscreen -> onscreen.
+ * This is difficult to manage directly because the contents of each pass varies
+ * due to depth sorting of the crystals with the orb sprites.
+ */
+class RenderPassStateTracker {
+    private instList: GfxRenderInstList = new GfxRenderInstList();
+    private debugName: string = "";
+    private resolveBindings: RenderPassResolveBinding[] = [];
+
+    constructor(private readonly colorTargetID: GfxrRenderTargetID,
+                private readonly depthTargetID: GfxrRenderTargetID,
+                private readonly biosScene: IBIOSScene) {
+    }
+
+    public getInstList(): GfxRenderInstList { return this.instList; }
+
+    public setDebugName(name: string) { this.debugName = name; }
+
+    public flushRenderPass(builder: GfxrGraphBuilder) {
+        if (this.instList.renderInsts.length === 0)
+            return;
+
+        builder.pushPass((pass) => {
+            const resolveBindings = this.resolveBindings;
+            this.resolveBindings = [];
+            const instList = this.instList;
+            this.instList = new GfxRenderInstList();
+
+            pass.setDebugName(this.debugName);
+            pass.attachRenderTargetID(GfxrAttachmentSlot.Color0, this.colorTargetID);
+            pass.attachRenderTargetID(GfxrAttachmentSlot.DepthStencil, this.depthTargetID);
+
+            for (let i = 0; i < resolveBindings.length; ++i) {
+                pass.attachResolveTexture(resolveBindings[i].id);
+            }
+
+            pass.exec((passRenderer, scope) => {
+                for (let i = 0; i < resolveBindings.length; ++i) {
+                    const resolveBinding = resolveBindings[i];
+                    instList.resolveLateSamplerBinding(resolveBinding.bindingName, {
+                        gfxTexture: scope.getResolveTextureForID(resolveBinding.id),
+                        gfxSampler: this.biosScene.clampSampler
+                    });
+                }
+                instList.drawOnPassRenderer(this.biosScene.renderHelper.renderCache, passRenderer);
+            });
+        });
+    }
+
+    public resolveRenderPass(builder: GfxrGraphBuilder): GfxrResolveTextureID {
+        this.flushRenderPass(builder);
+        return builder.resolveRenderTarget(this.colorTargetID);
+    }
+
+    public resolveFrom(builder: GfxrGraphBuilder, resolveSource: RenderPassStateTracker, bindingName: string) {
+        this.flushRenderPass(builder);
+        this.resolveBindings.push({
+            bindingName,
+            id: resolveSource.resolveRenderPass(builder)
+        });
+    }
+
+    public resolveFromSelf(builder: GfxrGraphBuilder, bindingName: string) {
+        this.resolveFrom(builder, this, bindingName);
+    }
+}
+
+interface ClockDrawParams extends DrawParams {
+    onscreenStateTracker: RenderPassStateTracker,
+    offscreen0StateTracker: RenderPassStateTracker,
+    offscreen1StateTracker: RenderPassStateTracker,
+}
+
 export class ClockModule extends BIOSModule<StableState> {
-    private refractInstLists: GfxRenderInstList[] = [];
-    private curRefractInstListIdx: number = -1;
-    private reflectInstLists: GfxRenderInstList[] = [];
-    private curReflectInstListIdx: number = -1;
-
-    private resetInstLists() {
-        this.curRefractInstListIdx = -1;
-        this.curReflectInstListIdx = -1;
-    }
-
-    private startRefractInstList(): GfxRenderInstList {
-        this.curRefractInstListIdx += 1;
-        if (this.refractInstLists[this.curRefractInstListIdx] === undefined)
-            this.refractInstLists[this.curRefractInstListIdx] = new GfxRenderInstList();
-        this.refractInstLists[this.curRefractInstListIdx].reset();
-        return this.refractInstLists[this.curRefractInstListIdx];
-    }
-
-    private getCurRefractInstList(): GfxRenderInstList {
-        return this.refractInstLists[this.curRefractInstListIdx];
-    }
-
-    private startReflectInstList(): GfxRenderInstList {
-        this.curReflectInstListIdx += 1;
-        if (this.reflectInstLists[this.curReflectInstListIdx] === undefined)
-            this.reflectInstLists[this.curReflectInstListIdx] = new GfxRenderInstList();
-        this.reflectInstLists[this.curReflectInstListIdx].reset();
-        return this.reflectInstLists[this.curReflectInstListIdx];
-    }
-
-    private getCurReflectInstList(): GfxRenderInstList {
-        return this.reflectInstLists[this.curReflectInstListIdx];
-    }
-
     private frameCounter: number = 0;
     private eyeDirection: vec3 = vec3.create();
     private eyeUpDirection: vec3 = vec3.create();
@@ -397,6 +452,18 @@ export class ClockModule extends BIOSModule<StableState> {
     private orbInterpState: OrbInterpState = OrbInterpState.Idle;
 
     private bgColorBiasLerp: LerpController = new LerpController(40);
+
+    private conditionallyIncreaseBGBias() {
+        if (this.bgColorBiasLerp.isInState(LerpState.DoneDecreasing)) {
+            this.bgColorBiasLerp.conditionallyStartIncreasing();
+        }
+    }
+
+    private conditionallyDecreaseBGBias() {
+        if (this.bgColorBiasLerp.isInState(LerpState.DoneIncreasing)) {
+            this.bgColorBiasLerp.conditionallyStartDecreasing();
+        }
+    }
 
     private tickBG() {
         this.bgColorBiasLerp.tick();
@@ -408,9 +475,19 @@ export class ClockModule extends BIOSModule<StableState> {
         this.tickStableState.bgScrollAnim += 1;
     }
 
-    private drawBG() {
-        this.biosScene.clockBGGeometry.draw(this.biosScene, this.getCurRefractInstList(),
+    private drawBG(clockDrawParams: ClockDrawParams) {
+        clockDrawParams.offscreen0StateTracker.setDebugName("BG Draw Pass 0");
+        this.biosScene.clockBGGeometry.draw(this.biosScene, clockDrawParams.offscreen0StateTracker.getInstList(),
             this.drawStableState.bgColorBias, this.drawStableState.bgScrollAnim);
+
+        clockDrawParams.offscreen1StateTracker.setDebugName("BG Draw Pass 1");
+        this.biosScene.clockBGGeometry.draw(this.biosScene, clockDrawParams.offscreen1StateTracker.getInstList(),
+            this.drawStableState.bgColorBias, this.drawStableState.bgScrollAnim);
+
+        clockDrawParams.onscreenStateTracker.resolveFrom(clockDrawParams.builder, clockDrawParams.offscreen0StateTracker, "offscreen");
+        clockDrawParams.onscreenStateTracker.setDebugName("BG Color Correct Pass");
+        this.biosScene.fullscreenBlitGeometry.draw(this.biosScene, clockDrawParams.onscreenStateTracker.getInstList(),
+            [55/128, 40/128, 60/128, 1], { gfxTexture: null, gfxSampler: null, lateBinding: "offscreen" }, false);
     }
 
     private incrementClockCrystalColors(inactiveHourRefractionRGBA: vec4,
@@ -466,7 +543,7 @@ export class ClockModule extends BIOSModule<StableState> {
         vec4.set(this.mainRefractionRGBA, 0xA7, 0xD9, 0xFF, 0x0);
         this.getMainRefractionColor(this.mainRefractionRGBA);
         for (let i = 0; i < 3; ++i) {
-            this.activeHourRefractionRGBA[i] = this.mainRefractionRGBA[i] + (this.inactiveHourRefractionRGBA[i] >>> 1);
+            this.activeHourRefractionRGBA[i] = (this.mainRefractionRGBA[i] + this.inactiveHourRefractionRGBA[i]) >> 1;
         }
         this.incrementClockCrystalColors(this.inactiveHourRefractionRGBA, this.mainRefractionRGBA,
             this.activeHourRefractionRGBA, this.inactiveHourFlowRGBA, this.mainReflectionRGBA, this.activeHourFlowRGBA);
@@ -702,53 +779,87 @@ export class ClockModule extends BIOSModule<StableState> {
         this.sortedRenderObjects.sort((a, b) => a.getZOffset() - b.getZOffset());
     }
 
-    private drawRefractivePass(withCrystals: boolean) {
+    private drawRefractivePass(clockDrawParams: ClockDrawParams, withCrystals: boolean) {
         for (let i = 0; i < this.sortedRenderObjects.length; ++i) {
             const renderObject = this.sortedRenderObjects[i];
             if (renderObject instanceof OrbRenderObject) {
-                this.drawOrb(renderObject);
+                this.drawOrb(clockDrawParams, renderObject);
             } else if (withCrystals && renderObject instanceof CrystalRenderObject) {
-                this.drawCrystalRefractivePass(renderObject);
+                this.drawCrystalRefractivePass(clockDrawParams, renderObject);
             }
         }
     }
 
-    private drawReflectivePass(withCrystals: boolean) {
+    private drawReflectivePass(clockDrawParams: ClockDrawParams, withCrystals: boolean) {
         if (!withCrystals)
             return;
 
-        this.startReflectInstList();
+        const reflectColorDesc = makeBackbufferDescSimple(GfxrAttachmentSlot.Color0, clockDrawParams.viewerInput, opaqueBlackFullClearRenderPassDescriptor);
+        const reflectDepthDesc = makeBackbufferDescSimple(GfxrAttachmentSlot.DepthStencil, clockDrawParams.viewerInput, standardFullClearRenderPassDescriptor);
 
-        for (let i = 0; i < this.sortedRenderObjects.length; ++i) {
-            const renderObject = this.sortedRenderObjects[i];
-            if (renderObject instanceof CrystalRenderObject) {
-                this.drawCrystalReflectivePass(renderObject, 0);
+        for (let p = 0; p < 2; ++p) {
+            const instList = new GfxRenderInstList();
+            for (let i = 0; i < this.sortedRenderObjects.length; ++i) {
+                const renderObject = this.sortedRenderObjects[i];
+                if (renderObject instanceof CrystalRenderObject) {
+                    this.drawCrystalReflectivePass(instList, renderObject, p);
+                }
             }
-        }
 
-        this.startReflectInstList();
+            const reflectColorTargetID = clockDrawParams.builder.createRenderTargetID(reflectColorDesc, 'Reflect Color');
+            const reflectDepthTargetID = clockDrawParams.builder.createRenderTargetID(reflectDepthDesc, 'Reflect Depth');
+            clockDrawParams.builder.pushPass((pass) => {
+                pass.setDebugName(`Reflect Pass ${p}`);
+                pass.attachRenderTargetID(GfxrAttachmentSlot.Color0, reflectColorTargetID);
+                pass.attachRenderTargetID(GfxrAttachmentSlot.DepthStencil, reflectDepthTargetID);
+                pass.exec((passRenderer, scope) => {
+                    instList.drawOnPassRenderer(this.biosScene.renderHelper.renderCache, passRenderer);
+                });
+            });
 
-        for (let i = 0; i < this.sortedRenderObjects.length; ++i) {
-            const renderObject = this.sortedRenderObjects[i];
-            if (renderObject instanceof CrystalRenderObject) {
-                this.drawCrystalReflectivePass(renderObject, 1);
-            }
+            const reflectColorResolveTextureID = clockDrawParams.builder.resolveRenderTarget(reflectColorTargetID);
+            clockDrawParams.builder.pushPass((pass) => {
+                pass.setDebugName(`Merge Reflect Pass ${p}`);
+                pass.attachResolveTexture(reflectColorResolveTextureID);
+                pass.attachRenderTargetID(GfxrAttachmentSlot.Color0, clockDrawParams.mainColorTargetID);
+                pass.attachRenderTargetID(GfxrAttachmentSlot.DepthStencil, clockDrawParams.mainDepthTargetID);
+                const instList = new GfxRenderInstList();
+                this.biosScene.fullscreenBlitGeometry.draw(this.biosScene, instList, [30/128, 30/128, 30/128, 1],
+                    { gfxTexture: null, gfxSampler: null, lateBinding: "reflect" }, true);
+                pass.exec((passRenderer, scope) => {
+                    instList.resolveLateSamplerBinding("reflect", {
+                        gfxTexture: scope.getResolveTextureForID(reflectColorResolveTextureID),
+                        gfxSampler: this.biosScene.clampSampler
+                    });
+                    instList.drawOnPassRenderer(this.biosScene.renderHelper.renderCache, passRenderer);
+                });
+            });
         }
     }
 
-    private drawOrb(object: OrbRenderObject) {
+    private drawOrb(clockDrawParams: ClockDrawParams, object: OrbRenderObject) {
         mat4.getTranslation(scratchVec, object.block.objMtx);
-        this.biosScene.clockOrbSpriteGeometry.draw(this.biosScene, this.getCurRefractInstList(), scratchVec, [0x30, 0x62, 0x80, 0x3c])
+
+        const orbColor: vec4 = [0x30, 0x62, 0x80, 0x3c];
+
+        clockDrawParams.onscreenStateTracker.setDebugName("Orb Onscreen");
+        this.biosScene.clockOrbSpriteGeometry.draw(this.biosScene, clockDrawParams.onscreenStateTracker.getInstList(),
+            scratchVec, orbColor, [0x80, 0x80, 0x80, 0x80]);
+
+        clockDrawParams.offscreen0StateTracker.setDebugName("Orb Offscreen");
+        this.biosScene.clockOrbSpriteGeometry.draw(this.biosScene, clockDrawParams.offscreen0StateTracker.getInstList(),
+            scratchVec, orbColor, [0xff, 0xff, 0xff, 0x80]);
     }
 
     private topCrystalInnerMtx: mat4 = mat4.create();
     private topCrystalOuterMtx: mat4 = mat4.create();
-    private drawCrystalRefractivePass(object: CrystalRenderObject) {
+    private drawCrystalRefractivePass(clockDrawParams: ClockDrawParams, object: CrystalRenderObject) {
         const block = object.block;
         if (block.objScale[1] < 0)
             return;
 
         if (object.scaleInterp > 0) {
+
             vec3.copy(scratchVec, block.objScale);
             scratchVec[1] *= object.scaleInterp;
             mat4.scale(this.topCrystalInnerMtx, block.objMtx, scratchVec);
@@ -758,31 +869,68 @@ export class ClockModule extends BIOSModule<StableState> {
             scratchVec[1] *= 1 - object.scaleInterp;
             mat4.scale(this.topCrystalOuterMtx, scratchMtx, scratchVec);
 
-            this.biosScene.clockCrystalGeometry.drawRefractive(this.biosScene, this.startRefractInstList(), false,
+            clockDrawParams.offscreen1StateTracker.resolveFrom(clockDrawParams.builder, clockDrawParams.offscreen0StateTracker, "offscreen");
+            clockDrawParams.offscreen1StateTracker.setDebugName("Crystal Refract Offscreen Backface");
+            this.biosScene.clockCrystalGeometry.drawRefractive(this.biosScene,
+                clockDrawParams.offscreen1StateTracker.getInstList(), false,
                 this.topCrystalInnerMtx, object.boostRefractionRgba, object.boostViewDotScale,
-                block.refraction, block.texScrollStep, block.stScroll, block.bumpRGBA);
-            this.biosScene.clockCrystalGeometry.drawRefractive(this.biosScene, this.startRefractInstList(), false,
+                block.refraction, block.texScrollStep, 0, block.stScroll, block.refractBumpRGBA);
+            this.biosScene.clockCrystalGeometry.drawRefractive(this.biosScene,
+                clockDrawParams.offscreen1StateTracker.getInstList(), false,
                 this.topCrystalOuterMtx, block.refractionRGBA, block.viewDotScale,
-                block.refraction, block.texScrollStep, block.stScroll, block.bumpRGBA);
+                block.refraction, block.texScrollStep, 0, block.stScroll, block.refractBumpRGBA);
 
-            this.biosScene.clockCrystalGeometry.drawRefractive(this.biosScene, this.startRefractInstList(), true,
+            clockDrawParams.onscreenStateTracker.resolveFrom(clockDrawParams.builder, clockDrawParams.offscreen1StateTracker, "offscreen");
+            clockDrawParams.onscreenStateTracker.setDebugName("Crystal Refract Onscreen Frontface");
+            this.biosScene.clockCrystalGeometry.drawRefractive(this.biosScene,
+                clockDrawParams.onscreenStateTracker.getInstList(), true,
                 this.topCrystalInnerMtx, object.boostRefractionRgba, object.boostViewDotScale,
-                block.refraction, block.texScrollStep, block.stScroll, [0,0,0,0]);
-            this.biosScene.clockCrystalGeometry.drawRefractive(this.biosScene, this.startRefractInstList(), true,
+                block.refraction, block.texScrollStep, 0, block.stScroll, [0,0,0,0]);
+            this.biosScene.clockCrystalGeometry.drawRefractive(this.biosScene,
+                clockDrawParams.onscreenStateTracker.getInstList(), true,
                 this.topCrystalOuterMtx, block.refractionRGBA, block.viewDotScale,
-                block.refraction, block.texScrollStep, block.stScroll, [0,0,0,0]);
+                block.refraction, block.texScrollStep, 0, block.stScroll, [0,0,0,0]);
+
+            clockDrawParams.offscreen0StateTracker.resolveFrom(clockDrawParams.builder, clockDrawParams.offscreen1StateTracker, "offscreen");
+            clockDrawParams.offscreen0StateTracker.setDebugName("Crystal Refract Offscreen Frontface");
+            this.biosScene.clockCrystalGeometry.drawRefractive(this.biosScene,
+                clockDrawParams.offscreen0StateTracker.getInstList(), true,
+                this.topCrystalInnerMtx, object.boostRefractionRgba, object.boostViewDotScale,
+                block.refraction, block.texScrollStep, 0xff, block.stScroll, [0,0,0,0]);
+            this.biosScene.clockCrystalGeometry.drawRefractive(this.biosScene,
+                clockDrawParams.offscreen0StateTracker.getInstList(), true,
+                this.topCrystalOuterMtx, block.refractionRGBA, block.viewDotScale,
+                block.refraction, block.texScrollStep, 0xff, block.stScroll, [0,0,0,0]);
+
         } else {
+
             mat4.scale(scratchMtx, block.objMtx, block.objScale);
-            this.biosScene.clockCrystalGeometry.drawRefractive(this.biosScene, this.startRefractInstList(), false,
+
+            clockDrawParams.offscreen1StateTracker.resolveFrom(clockDrawParams.builder, clockDrawParams.offscreen0StateTracker, "offscreen");
+            clockDrawParams.offscreen1StateTracker.setDebugName("Crystal Refract Offscreen Backface");
+            this.biosScene.clockCrystalGeometry.drawRefractive(this.biosScene,
+                clockDrawParams.offscreen1StateTracker.getInstList(), false,
                 scratchMtx, block.refractionRGBA, block.viewDotScale,
-                block.refraction, block.texScrollStep, block.stScroll, block.bumpRGBA);
-            this.biosScene.clockCrystalGeometry.drawRefractive(this.biosScene, this.startRefractInstList(), true,
+                block.refraction, block.texScrollStep, 0, block.stScroll, block.refractBumpRGBA);
+
+            clockDrawParams.onscreenStateTracker.resolveFrom(clockDrawParams.builder, clockDrawParams.offscreen1StateTracker, "offscreen");
+            clockDrawParams.onscreenStateTracker.setDebugName("Crystal Refract Onscreen Frontface");
+            this.biosScene.clockCrystalGeometry.drawRefractive(this.biosScene,
+                clockDrawParams.onscreenStateTracker.getInstList(), true,
                 scratchMtx, block.refractionRGBA, block.viewDotScale,
-                block.refraction, block.texScrollStep, block.stScroll, [0,0,0,0]);
+                block.refraction, block.texScrollStep, 0, block.stScroll, [0,0,0,0]);
+
+            clockDrawParams.offscreen0StateTracker.resolveFrom(clockDrawParams.builder, clockDrawParams.offscreen1StateTracker, "offscreen");
+            clockDrawParams.offscreen0StateTracker.setDebugName("Crystal Refract Offscreen Frontface");
+            this.biosScene.clockCrystalGeometry.drawRefractive(this.biosScene,
+                clockDrawParams.offscreen0StateTracker.getInstList(), true,
+                scratchMtx, block.refractionRGBA, block.viewDotScale,
+                block.refraction, block.texScrollStep, 0xff, block.stScroll, [0,0,0,0]);
+
         }
     }
 
-    private drawCrystalReflectivePass(object: CrystalRenderObject, bumpDir: number) {
+    private drawCrystalReflectivePass(instList: GfxRenderInstList, object: CrystalRenderObject, bumpDir: number) {
         const block = object.block;
         if (block.objScale[1] < 0)
             return;
@@ -797,14 +945,14 @@ export class ClockModule extends BIOSModule<StableState> {
             scratchVec[1] *= 1 - object.scaleInterp;
             mat4.scale(this.topCrystalOuterMtx, scratchMtx, scratchVec);
 
-            this.biosScene.clockCrystalGeometry.drawReflective(this.biosScene, this.getCurReflectInstList(),
+            this.biosScene.clockCrystalGeometry.drawReflective(this.biosScene, instList,
                 this.topCrystalInnerMtx, block.texScrollStep, block.flowRGBA, block.bumpRGBA, bumpDir, block.stScroll);
 
-            this.biosScene.clockCrystalGeometry.drawReflective(this.biosScene, this.getCurReflectInstList(),
+            this.biosScene.clockCrystalGeometry.drawReflective(this.biosScene, instList,
                 this.topCrystalOuterMtx, block.texScrollStep, block.flowRGBA, block.bumpRGBA, bumpDir, block.stScroll);
         } else {
             mat4.scale(scratchMtx, block.objMtx, block.objScale);
-            this.biosScene.clockCrystalGeometry.drawReflective(this.biosScene, this.getCurReflectInstList(),
+            this.biosScene.clockCrystalGeometry.drawReflective(this.biosScene, instList,
                 scratchMtx, block.texScrollStep, block.flowRGBA, block.bumpRGBA, bumpDir, block.stScroll);
         }
     }
@@ -821,73 +969,38 @@ export class ClockModule extends BIOSModule<StableState> {
     }
 
     public draw(params: DrawParams) {
-        this.resetInstLists();
-        this.startRefractInstList();
-        this.drawBG();
+        const offscreenColorDesc = makeBackbufferDescSimple(GfxrAttachmentSlot.Color0, params.viewerInput, opaqueBlackFullClearRenderPassDescriptor);
+        const offscreenDepthDesc = makeBackbufferDescSimple(GfxrAttachmentSlot.DepthStencil, params.viewerInput, standardFullClearRenderPassDescriptor);
+
+        // Full crystals (Offscreen 1 refraction source)
+        const offscreen0ColorTargetID = params.builder.createRenderTargetID(offscreenColorDesc, 'Offscreen 0 Color');
+        const offscreen0DepthTargetID = params.builder.createRenderTargetID(offscreenDepthDesc, 'Offscreen 0 Depth');
+
+        // Crystal backfaces only (Onscreen refraction source)
+        const offscreen1ColorTargetID = params.builder.createRenderTargetID(offscreenColorDesc, 'Offscreen 1 Color');
+        const offscreen1DepthTargetID = params.builder.createRenderTargetID(offscreenDepthDesc, 'Offscreen 1 Depth');
+
+        const offscreen0StateTracker = new RenderPassStateTracker(offscreen0ColorTargetID, offscreen0DepthTargetID, this.biosScene);
+        const offscreen1StateTracker = new RenderPassStateTracker(offscreen1ColorTargetID, offscreen1DepthTargetID, this.biosScene);
+        const onscreenStateTracker = new RenderPassStateTracker(params.mainColorTargetID, params.mainDepthTargetID, this.biosScene);
+
+        const clockDrawParams: ClockDrawParams = {
+            ...params,
+            onscreenStateTracker,
+            offscreen0StateTracker,
+            offscreen1StateTracker
+        };
+
+        this.drawBG(clockDrawParams);
 
         this.updateRenderObjects(params.viewerInput.camera.viewMatrix);
 
         const withCrystals = this.drawStableState.crystalStates[0].crystalLengthScale > 0.05;
-        this.drawRefractivePass(withCrystals);
-        this.drawReflectivePass(withCrystals);
+        this.drawRefractivePass(clockDrawParams, withCrystals);
 
-        params.builder.pushPass((pass) => {
-            pass.setDebugName("Main Pass");
-            pass.attachRenderTargetID(GfxrAttachmentSlot.Color0, params.mainColorTargetID);
-            pass.attachRenderTargetID(GfxrAttachmentSlot.DepthStencil, params.mainDepthTargetID);
-            pass.exec((passRenderer, scope) => {
-                this.refractInstLists[0].drawOnPassRenderer(this.biosScene.renderHelper.renderCache, passRenderer);
-            });
-        });
+        onscreenStateTracker.flushRenderPass(params.builder);
 
-        for (let i = 1; i <= this.curRefractInstListIdx; ++i) {
-            const sceneColorResolveTextureID = params.builder.resolveRenderTarget(params.mainColorTargetID);
-            params.builder.pushPass((pass) => {
-                pass.setDebugName(`Refract Pass ${i}`);
-                pass.attachResolveTexture(sceneColorResolveTextureID);
-                pass.attachRenderTargetID(GfxrAttachmentSlot.Color0, params.mainColorTargetID);
-                pass.attachRenderTargetID(GfxrAttachmentSlot.DepthStencil, params.mainDepthTargetID);
-                pass.exec((passRenderer, scope) => {
-                    const sceneColorTexture = scope.getResolveTextureForID(sceneColorResolveTextureID);
-                    this.refractInstLists[i].resolveLateSamplerBinding("sceneColor", {
-                        gfxTexture: sceneColorTexture,
-                        gfxSampler: this.biosScene.clampSampler
-                    });
-                    this.refractInstLists[i].drawOnPassRenderer(this.biosScene.renderHelper.renderCache, passRenderer);
-                });
-            });
-        }
-
-        const reflectColorDesc = makeBackbufferDescSimple(GfxrAttachmentSlot.Color0, params.viewerInput, opaqueBlackFullClearRenderPassDescriptor);
-        const reflectDepthDesc = makeBackbufferDescSimple(GfxrAttachmentSlot.DepthStencil, params.viewerInput, standardFullClearRenderPassDescriptor);
-
-        for (let i = 0; i <= this.curReflectInstListIdx; ++i) {
-            const reflectColorTargetID = params.builder.createRenderTargetID(reflectColorDesc, 'Reflect Color');
-            const reflectDepthTargetID = params.builder.createRenderTargetID(reflectDepthDesc, 'Reflect Depth');
-            params.builder.pushPass((pass) => {
-                pass.setDebugName(`Reflect Pass ${i}`);
-                pass.attachRenderTargetID(GfxrAttachmentSlot.Color0, reflectColorTargetID);
-                pass.attachRenderTargetID(GfxrAttachmentSlot.DepthStencil, reflectDepthTargetID);
-                pass.exec((passRenderer, scope) => {
-                    this.reflectInstLists[i].drawOnPassRenderer(this.biosScene.renderHelper.renderCache, passRenderer);
-                });
-            });
-            const reflectColorResolveTextureID = params.builder.resolveRenderTarget(reflectColorTargetID);
-            params.builder.pushPass((pass) => {
-                pass.setDebugName(`Merge Reflect Pass ${i}`);
-                pass.attachResolveTexture(reflectColorResolveTextureID);
-                pass.attachRenderTargetID(GfxrAttachmentSlot.Color0, params.mainColorTargetID);
-                pass.attachRenderTargetID(GfxrAttachmentSlot.DepthStencil, params.mainDepthTargetID);
-                const renderInst = this.biosScene.renderHelper.renderInstManager.newRenderInst();
-                this.biosScene.fullscreenBlitGeometry.draw(this.biosScene, renderInst, [30/128, 30/128, 30/128, 1], true);
-                pass.exec((passRenderer, scope) => {
-                    renderInst.setSamplerBindingsFromTextureMappings([
-                        { gfxTexture: scope.getResolveTextureForID(reflectColorResolveTextureID), gfxSampler: this.biosScene.clampSampler },
-                    ]);
-                    renderInst.drawOnPass(this.biosScene.renderHelper.renderCache, passRenderer);
-                });
-            });
-        }
+        this.drawReflectivePass(clockDrawParams, withCrystals);
     }
 
     public updateCameraMatrix(cameraMatrix: mat4, roll: boolean) {
@@ -904,6 +1017,7 @@ export class ClockModule extends BIOSModule<StableState> {
         this.initClockProgress();
 
         // TODO: remove test
+        this.conditionallyIncreaseBGBias();
         this.conditionallyStartCrystalGrow();
     }
 }

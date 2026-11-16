@@ -36,23 +36,22 @@ ${ClockOrbSpriteProgram.Common}
 layout(location = ${ClockOrbSpriteProgram.a_Position}) in vec3 a_Position;
 layout(location = ${ClockOrbSpriteProgram.a_TexCoord}) in vec2 a_TexCoord;
 
-out vec3 v_Color;
+out vec4 v_Color;
 out vec2 v_TexCoord;
 out float v_Highlight;
 
 void main() {
-    vec4 t_FlarePosWorld = UnpackMatrix(u_ClipFromWorld) * vec4(u_FlarePos_CameraAspectCorrect.xyz, 1.0f);
-    vec3 Delta = a_Position;
-    Delta.x *= u_FlarePos_CameraAspectCorrect.w;
-    t_FlarePosWorld.xyz += Delta;
+    vec3 t_FlareViewPos = mat3(UnpackMatrix(u_ViewFromWorld)) * a_Position;
+    vec3 t_FlarePos = u_FlarePos.xyz + t_FlareViewPos;
+    vec4 t_FlarePosWorld = UnpackMatrix(u_ClipFromWorld) * vec4(t_FlarePos, 1.0f);
     gl_Position = t_FlarePosWorld;
     if (gl_VertexID < 4) {
-        // Color part
-        v_Color = u_FlareColor.rgb;
+        // Blur part
+        v_Color = u_BlurColor;
         v_Highlight = 0.0;
     } else {
         // Highlight part
-        v_Color = vec3(1.f);
+        v_Color = u_HighlightColor;
         v_Highlight = 1.0;
     }
     v_TexCoord = a_TexCoord.xy;
@@ -62,15 +61,16 @@ void main() {
     public override frag = `
 ${ClockOrbSpriteProgram.Common}
 
-in vec3 v_Color;
+in vec4 v_Color;
 in vec2 v_TexCoord;
 in float v_Highlight;
 
 void main() {
     vec2 t_Sample = texture(SAMPLER_2D(u_Texture), v_TexCoord.xy).rg;
     float t_SelSample = v_Highlight != 0.0 ? t_Sample.g : t_Sample.r;
-    gl_FragColor.rgb = t_SelSample * v_Color;
-    gl_FragColor.a = 1.0;
+    t_SelSample = t_SelSample * 255.0f / 128.0f;
+    gl_FragColor.rgb = clamp(t_SelSample * v_Color.rgb, vec3(0.0), vec3(1.0));
+    gl_FragColor.a = clamp(v_Color.a, 0.0, 1.0);
 }
 `;
 
@@ -78,8 +78,9 @@ void main() {
 ${BaseProgram.BaseCommon}
 
 layout(std140) uniform ub_ClockOrbSpriteParams {
-    vec4 u_FlarePos_CameraAspectCorrect;
-    vec4 u_FlareColor;
+    vec4 u_FlarePos;
+    vec4 u_BlurColor;
+    vec4 u_HighlightColor;
 };
 
 uniform sampler2D u_Texture;
@@ -109,17 +110,17 @@ export default class ClockOrbSpriteGeometry {
         vertexData.set([
             //   Quad 0 - Color
             //   X   Y   Z      U  V
-            -30.0, -30.0, 0,      0.0, 0.0,
-            30.0, -30.0, 0,      1.0, 0.0,
-            -30.0,  30.0, 0,      0.0, 1.0,
-            30.0,  30.0, 0,      1.0, 1.0,
+            -30.0 / 4, -30.0 / 4, 0,      0.0, 0.0,
+            30.0 / 4, -30.0 / 4, 0,      1.0, 0.0,
+            -30.0 / 4,  30.0 / 4, 0,      0.0, 1.0,
+            30.0 / 4,  30.0 / 4, 0,      1.0, 1.0,
 
             //   Quad 1 - Highlight
             //   X   Y   Z      U  V
-            -4.5, -4.5, 0,    0.0, 0.0,
-            4.5, -4.5, 0,    1.0, 0.0,
-            -4.5,  4.5, 0,    0.0, 1.0,
-            4.5,  4.5, 0,    1.0, 1.0,
+            -4.5 / 4, -4.5 / 4, 0,    0.0, 0.0,
+            4.5 / 4, -4.5 / 4, 0,    1.0, 0.0,
+            -4.5 / 4,  4.5 / 4, 0,    0.0, 1.0,
+            4.5 / 4,  4.5 / 4, 0,    1.0, 1.0,
         ]);
 
         this.indexCount = 2 * 6;
@@ -172,7 +173,7 @@ export default class ClockOrbSpriteGeometry {
         device.destroyBuffer(this.indexBuffer);
     }
 
-    public draw(biosScene: IBIOSScene, instList: GfxRenderInstList, flarePos: vec3, flareColor: vec4){
+    public draw(biosScene: IBIOSScene, instList: GfxRenderInstList, flarePos: vec3, blurColor: vec4, highlightColor: vec4){
         const renderInst = biosScene.renderHelper.renderInstManager.newRenderInst();
 
         renderInst.setGfxProgram(this.gfxProgram);
@@ -190,12 +191,14 @@ export default class ClockOrbSpriteGeometry {
         renderInst.setDrawCount(this.indexCount);
 
         const orbParams = renderInst.allocateUniformBufferF32(
-            ClockOrbSpriteProgram.ub_ClockOrbSpriteParams, 4 + 4);
+            ClockOrbSpriteProgram.ub_ClockOrbSpriteParams, 4 + 4 + 4);
 
         let offs = 0;
-        offs += fillVec3v(orbParams, offs, flarePos, 1.0 / biosScene.cameraAspect);
+        offs += fillVec3v(orbParams, offs, flarePos);
 
-        offs += fillVec4(orbParams, offs, flareColor[0] / 128, flareColor[1] / 128, flareColor[2] / 128, flareColor[3] / 128);
+        offs += fillVec4(orbParams, offs, blurColor[0] / 128, blurColor[1] / 128, blurColor[2] / 128, blurColor[3] / 128);
+
+        offs += fillVec4(orbParams, offs, highlightColor[0] / 128, highlightColor[1] / 128, highlightColor[2] / 128, highlightColor[3] / 128);
 
         renderInst.setMegaStateFlags({
             attachmentsState: [

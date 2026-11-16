@@ -1,8 +1,14 @@
 import {GfxProgram} from "../../gfx/platform/GfxPlatformImpl";
 import {GfxRenderCache} from "../../gfx/render/GfxRenderCache";
-import {GfxBlendFactor, GfxBlendMode, GfxChannelWriteMask, GfxDevice,} from "../../gfx/platform/GfxPlatform";
+import {
+    GfxBlendFactor,
+    GfxBlendMode,
+    GfxChannelWriteMask,
+    GfxDevice,
+    GfxSamplerBinding,
+} from "../../gfx/platform/GfxPlatform";
 import IBIOSScene from "../IBIOSScene";
-import {GfxRenderInst} from "../../gfx/render/GfxRenderInstManager";
+import {GfxRenderInstList} from "../../gfx/render/GfxRenderInstManager";
 import {DeviceProgram} from "../../Program";
 import {GfxShaderLibrary} from "../../gfx/helpers/GfxShaderLibrary";
 import {vec4} from "gl-matrix";
@@ -35,9 +41,8 @@ export default class FullscreenBlitGeometry {
     public destroy(device: GfxDevice): void {
     }
 
-    public draw(biosScene: IBIOSScene, renderInst: GfxRenderInst, modColor: vec4, additive: boolean){
-        renderInst.setUniformBuffer(biosScene.renderHelper.uniformBuffer);
-        renderInst.setAllowSkippingIfPipelineNotReady(false);
+    public draw(biosScene: IBIOSScene, instList: GfxRenderInstList, modColor: vec4, texBinding: GfxSamplerBinding, additive: boolean){
+        const renderInst = biosScene.renderHelper.renderInstManager.newRenderInst();
 
         renderInst.setMegaStateFlags(makeMegaState({
             attachmentsState: [
@@ -61,7 +66,11 @@ export default class FullscreenBlitGeometry {
 
         renderInst.setGfxProgram(this.gfxProgram);
 
+        renderInst.setSamplerBindings(0, [texBinding]);
+
         const blitParams = renderInst.allocateUniformBufferF32(0, 4);
         fillVec4v(blitParams, 0, modColor);
+
+        instList.submitRenderInst(renderInst);
     }
 }

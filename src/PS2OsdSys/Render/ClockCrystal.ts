@@ -43,12 +43,11 @@ class ClockCrystalRefractiveProgram extends ClockCrystalBaseProgram {
 ${ClockCrystalRefractiveProgram.Common}
 ${ClockCrystalBaseProgram.BaseVert}
 
-out vec3 v_RefractiveColor;
+out vec3 v_RefractiveColorMod;
 out vec2 v_TexCoordSub;
 out vec2 v_TexCoordAdd;
 out vec2 v_ViewNormal2D;
 out vec2 v_Center2D;
-out float v_CameraNormalDotHighlight;
 
 #define PI ${Math.PI}
 
@@ -72,14 +71,17 @@ void main() {
     float t_CameraNormalDot = abs(dot(t_CenterViewNorm, t_NormalView));
     t_CameraNormalDot = 1.0 - t_CameraNormalDot;
     float t_ViewDotScale = u_RefractiveColor_ViewDotScale.a;
-    v_CameraNormalDotHighlight = t_ViewDotScale * 10.0 * t_CameraNormalDot * t_CameraNormalDot * t_CameraNormalDot * t_CameraNormalDot;
+    float t_CameraNormalDotHighlight = t_ViewDotScale * 10.0 * t_CameraNormalDot * t_CameraNormalDot * t_CameraNormalDot * t_CameraNormalDot;
     if (t_CameraNormalDot > 0.9)
-        v_CameraNormalDotHighlight *= (1.0 - cos((1.0 - t_CameraNormalDot) * PI * 10.0)) * 0.5;
-    v_CameraNormalDotHighlight /= 128.0;
+        t_CameraNormalDotHighlight *= (1.0 - cos((1.0 - t_CameraNormalDot) * PI * 10.0)) * 0.5;
+    t_CameraNormalDotHighlight /= 128.0;
 
-    v_RefractiveColor = u_RefractiveColor_ViewDotScale.rgb;
+    float RefractiveBoost = u_Magnification_Refraction_TexScrollStep_RefractiveBoost.w;
+    v_RefractiveColorMod = vec3(t_CameraNormalDotHighlight + RefractiveBoost) + u_RefractiveColor_ViewDotScale.rgb;
+    v_RefractiveColorMod = clamp(v_RefractiveColorMod, vec3(0.0), vec3(255.0 / 128.0));
+    //v_RefractiveColorMod = u_RefractiveColor_ViewDotScale.rgb;
 
-    float TexScrollStep = u_Magnification_Refraction_TexScrollStep.z;
+    float TexScrollStep = u_Magnification_Refraction_TexScrollStep_RefractiveBoost.z;
     v_TexCoordSub = a_TexCoord + vec2((TexScrollStep + a_QuadIdx) / 10.0);
     v_TexCoordAdd = v_TexCoordSub + u_TexAddScrollXY.xy;
 }
@@ -88,16 +90,15 @@ void main() {
     public override frag = `
 ${ClockCrystalRefractiveProgram.Common}
 
-in vec3 v_RefractiveColor;
+in vec3 v_RefractiveColorMod;
 in vec2 v_TexCoordSub;
 in vec2 v_TexCoordAdd;
 in vec2 v_ViewNormal2D;
 in vec2 v_Center2D;
-in float v_CameraNormalDotHighlight;
 
 void main() {
-    float Magnification = u_Magnification_Refraction_TexScrollStep.x;
-    float Refraction = u_Magnification_Refraction_TexScrollStep.y;
+    float Magnification = u_Magnification_Refraction_TexScrollStep_RefractiveBoost.x;
+    float Refraction = u_Magnification_Refraction_TexScrollStep_RefractiveBoost.y;
 
     // Use refraction proportions of a 4:3 aspect ratio.
     ivec2 SceneSize = textureSize(TEXTURE(u_SceneTexture), 0);
@@ -111,14 +112,13 @@ void main() {
     vec2 RefractOffset = v_ViewNormal2D * HalfSceneSize4x3 * Refraction * gl_FragCoord.w;
     vec2 ScreenCoord = clamp(MagnificationOffset - RefractOffset, vec2(0.0), vec2(SceneSize - ivec2(1)));
     vec2 SampleCenter = (ScreenCoord + 0.5) / vec2(SceneSize);
-    vec3 SceneColor = texture(SAMPLER_2D(u_SceneTexture), SampleCenter).rgb;
-    SceneColor *= vec3(v_CameraNormalDotHighlight) + v_RefractiveColor;
+    vec3 SceneColor = texture(SAMPLER_2D(u_SceneTexture), SampleCenter).rgb * v_RefractiveColorMod;
 
     float BumpSampleSub = texture(SAMPLER_2D(u_Texture), v_TexCoordSub).r;
     float BumpSampleAdd = texture(SAMPLER_2D(u_Texture), v_TexCoordAdd).r;
     vec3 ModulatedColor = SceneColor + vec3(BumpSampleAdd - BumpSampleSub) * u_BumpRGB.rgb;
 
-    gl_FragColor.rgb = ModulatedColor;
+    gl_FragColor.rgb = clamp(ModulatedColor, vec3(0.0), vec3(1.0));
     //gl_FragColor.rgb = texture(SAMPLER_2D(u_Texture), v_TexCoordSub).rgb;
     gl_FragColor.a = 1.f;
 
@@ -133,7 +133,7 @@ ${BaseProgram.BaseCommon}
 layout(std140) uniform ub_ClockCrystalRefractiveParams {
     Mat3x4 u_WorldFromLocal;
     vec4 u_RefractiveColor_ViewDotScale;
-    vec4 u_Magnification_Refraction_TexScrollStep;
+    vec4 u_Magnification_Refraction_TexScrollStep_RefractiveBoost;
     vec4 u_TexAddScrollXY;
     vec4 u_BumpRGB;
 };
@@ -167,7 +167,7 @@ void main() {
     vec3 t_PositionView = (t_ViewFromWorld * vec4(t_PositionWorld, 1.0f)).xyz;
     vec3 t_PositionViewNorm = normalize(t_PositionView);
     float t_CameraNormalDot = abs(dot(t_PositionViewNorm, t_NormalView));
-    v_RefTexCoord = ((t_PositionViewNorm + t_NormalView * t_CameraNormalDot * 2.0) + 1.0).xy;
+    v_RefTexCoord = ((t_PositionViewNorm + t_NormalView * t_CameraNormalDot * 2.0) + 1.0).xy / vec2(2.0);
 
     float TexScrollStep = u_FlowRGB_TexScrollStep.w;
     v_TexCoordSub = a_TexCoord + vec2((TexScrollStep + a_QuadIdx) / 10.0) + (u_BumpRGB_BumpDir.w != 0.0 ? u_TexSubScrollXY.xy : vec2(0.0));
@@ -186,7 +186,7 @@ void main() {
     vec2 BumpSampleSubRG = texture(SAMPLER_2D(u_Texture), v_TexCoordSub).rg;
     float BumpSampleSub = u_BumpRGB_BumpDir.w != 0.0 ? BumpSampleSubRG.r : BumpSampleSubRG.g;
 
-    gl_FragColor.rgb = Ref * u_FlowRGB_TexScrollStep.rgb - BumpSampleSub * u_BumpRGB_BumpDir.rgb;
+    gl_FragColor.rgb = clamp(Ref * u_FlowRGB_TexScrollStep.rgb - BumpSampleSub * u_BumpRGB_BumpDir.rgb, vec3(0.0), vec3(1.0));
     gl_FragColor.a = 1.f;
 }
 `;
@@ -503,6 +503,7 @@ export default class ClockCrystalGeometry {
                           viewDotScale: number,
                           refraction: number,
                           texScrollStep: number,
+                          refractiveBoost: number,
                           texAddScroll: vec2,
                           bumpRGBA: vec4){
         const renderInst = biosScene.renderHelper.renderInstManager.newRenderInst();
@@ -513,7 +514,7 @@ export default class ClockCrystalGeometry {
         renderInst.setGfxProgram(this.gfxRefractiveProgram);
 
         renderInst.setSamplerBindings(0, [
-            { gfxTexture: null, gfxSampler: null, lateBinding: "sceneColor" },
+            { gfxTexture: null, gfxSampler: null, lateBinding: "offscreen" },
             { gfxTexture: this.crysTexture, gfxSampler: biosScene.linearSampler }
         ]);
 
@@ -534,7 +535,7 @@ export default class ClockCrystalGeometry {
         offs += fillVec4(clockCrystalParams, offs, refractiveRGBA[0] / 128, refractiveRGBA[1] / 128, refractiveRGBA[2] / 128, viewDotScale);
 
         const magnification = 0.95;
-        offs += fillVec4(clockCrystalParams, offs, magnification, refraction, texScrollStep);
+        offs += fillVec4(clockCrystalParams, offs, magnification, refraction, texScrollStep, refractiveBoost / 128);
 
         offs += fillVec4(clockCrystalParams, offs, texAddScroll[0], texAddScroll[1]);
 
